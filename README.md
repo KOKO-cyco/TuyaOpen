@@ -1,113 +1,207 @@
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/c128362b-eb25-4512-b5f2-ad14aae2395c.jpg" width="100%" >
-</p>
+# RK3576 + ES8388 Onboard Microphone Audio Setup Guide
 
-<p align="center">
-  <a href="https://tuyaopen.ai/docs/quick-start/enviroment-setup">Quick Start</a> ·
-  <a href="https://developer.tuya.com/en/docs/iot/ai-agent-management?id=Kdxr4v7uv4fud">Tuya AI Agent</a> ·
-  <a href="https://tuyaopen.ai/docs/about-tuyaopen">Documentation</a> ·
-  <a href="https://tuyaopen.ai/docs/hardware-specific/t5-ai-board/overview-t5-ai-board">Hardware Resource</a>
-</p>
+## Background
 
-<p align="center">
-    <a href="https://github.com/tuya/TuyaOpen/actions/workflows/check-build-apps.yml" target="_blank">
-        <img src="https://github.com/tuya/TuyaOpen/actions/workflows/check-build-apps.yml/badge.svg"
-            alt="TuyaOpen Check Build"></a>
-    <a href="https://tuyaopen.ai" target="_blank">
-        <img alt="Static Badge" src="https://img.shields.io/badge/Product-F04438"></a>
-    <a href="https://tuyaopen.ai/pricing" target="_blank">
-        <img alt="Static Badge" src="https://img.shields.io/badge/free-pricing?logo=free&color=%20%23155EEF&label=pricing&labelColor=%20%23528bff"></a>
-    <a href="https://discord.gg/cbGrBjx7" target="_blank">
-        <img src="https://img.shields.io/badge/Discord-Join%20Chat-5462eb?logo=discord&labelColor=%235462eb&logoColor=%23f5f5f5&color=%235462eb"
-            alt="chat on Discord"></a>
-    <a href="https://www.youtube.com/@tuya2023" target="_blank">
-        <img src="https://img.shields.io/badge/YouTube-Subscribe-red?logo=youtube&labelColor=white"
-            alt="Subscribe on YouTube"></a>
-    <a href="https://x.com/tuyasmart" target="_blank">
-        <img src="https://img.shields.io/twitter/follow/tuyasmart?logo=X&color=%20%23f5f5f5"
-            alt="follow on X(Twitter)"></a>
-    <a href="https://www.linkedin.com/company/tuya-smart/" target="_blank">
-        <img src="https://custom-icon-badges.demolab.com/badge/LinkedIn-0A66C2?logo=linkedin-white&logoColor=fff"
-            alt="follow on LinkedIn"></a>
-    <a href="https://github.com/tuya/tuyaopen/graphs/commit-activity?branch=dev" target="_blank">
-        <img alt="Commits last month (dev branch)" src="https://img.shields.io/github/commit-activity/m/tuya/tuyaopen/dev?labelColor=%2332b583&color=%2312b76a"></a>
-    <a href="https://github.com/langgenius/dify/" target="_blank">
-        <img alt="Issues closed" src="https://img.shields.io/github/issues-search?query=repo%3Atuya%2Ftuyaopen%20is%3Aclosed&label=issues%20closed&labelColor=%20%237d89b0&color=%20%235d6b98"></a>
-</p>
+When running TuyaOpen AI Chat Bot on the LiChuang RK3576 development board, the onboard microphone (ES8388 codec) exhibits the following issues under default configuration:
 
+1. **Low onboard MIC sensitivity**: Datasheet specifies −42 dB, which makes far-field speech recognition difficult
+2. **Insufficient ES8388 default PGA gain**: Only +9 dB, not aggressive enough
+3. **Stereo phase inversion**: Left and right channels cancel each other out when downmixed to mono
+4. **Incorrect ALSA configuration**: Wrong sample rate or device routing causes silence or distorted audio
 
+## Solution
 
-<p align="center">
-  <a href="./README.md"><img alt="README in English" src="https://img.shields.io/badge/English-d9d9d9"></a>
-  <a href="./README_zh.md"><img alt="简体中文版自述文件" src="https://img.shields.io/badge/简体中文-d9d9d9"></a>
-</p>
+### 1. Increase ES8388 Analog Capture Gain
 
+```bash
+# Set left channel Capture Volume to maximum (+24 dB)
+amixer -c 0 cset numid=52 8
 
-## Overview
+# Set right channel Capture Volume to maximum (+24 dB)
+amixer -c 0 cset numid=53 8
+```
 
-TuyaOpen powers next-gen AI-agent hardware: it supports gear (Tuya T-Series WIFI/BT MCUs, Pi, ESP32s) via its flexible, cross-platform C/C++ SDK, pairs with Tuya Cloud’s low-latency multimodal AI (drag-and-drop workflows), integrates top models (ChatGPT, Gemini, Qwen, Doubao etc.), and streamlines open AI-IoT ecosystem building.
+### 2. Fix Left/Right Phase Inversion
 
-![TuyaOpen One Pager](https://images.tuyacn.com/fe-static/docs/img/2eed8b23-0459-4db4-8f17-e7cce8b36b8a.png)
+```bash
+# Set ADC Data Select to "Left Left" to avoid phase cancellation
+amixer -c 0 cset numid=61 1
+```
 
+### 3. Stop PipeWire (avoid audio routing conflicts)
 
-### 🚀 With TuyaOpen, you can:
-- Develop hardware products featuring speech technologies such as `ASR` (Automatic Speech Recognition), `KWS` (Keyword Spotting), `TTS` (Text-to-Speech), and `STT` (Speech-to-Text)
-- Integrate with leading LLMs and AI platforms, including `Deepseek`, `ChatGPT`, `Claude`, `Gemini`, and more.
-- Build smart devices with `advanced multimodal AI capabilities`, including voice, vision, and sensor-based features
-- Create custom products and seamlessly connect them to Tuya Cloud for `remote control`, `monitoring`, and `OTA updates`
-- Develop devices compatible with `Google Home` and `Amazon Alexa`
-- Design custom `Powered by Tuya` hardware
-- Target a wide range of hardware applications using `Bluetooth`, `Wi-Fi`, `Ethernet`, and more
-- Benefit from robust built-in `security`, `device authentication`, and `data encryption`
+```bash
+systemctl --user stop pipewire pipewire-pulse wireplumber pipewire.socket pipewire-pulse.socket
+```
 
+To disable on boot permanently:
 
-Whether you’re creating smart home products, industrial IoT solutions, or custom AI applications, TuyaOpen provides the tools and examples to get started quickly and scale your ideas across platforms.
+```bash
+systemctl --user disable pipewire.socket pipewire-pulse.socket pipewire wireplumber
+systemctl --user mask pipewire.socket pipewire-pulse.socket
+```
 
-## System Components
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/220c9d84-d5f1-4976-b910-b63e415e9e03.png" width="80%" >
-</p>
+### 4. Configure ALSA Default Device
 
+Edit `/etc/asound.conf`:
 
-### Detailed SDK Framework Stacks
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/25713212-9840-4cf5-889c-6f55476a59f9.jpg" width="80%" >
-</p>
+```bash
+sudo tee /etc/asound.conf << 'EOF'
+pcm.!default {
+    type plug
+    slave {
+        pcm "hw:0,0"
+        rate 48000
+        channels 2
+        format S16_LE
+    }
+}
+
+ctl.!default {
+    type hw
+    card 0
+}
+EOF
+```
+
+Key points:
+- ES8388 natively supports 48 kHz; forcing the slave to 48 kHz prevents audio distortion (high-pitched or pitch-shifted output)
+- `type plug` automatically handles sample-rate/channel conversion between the application (16 kHz mono) and hardware (48 kHz stereo)
+- PipeWire is bypassed; the program accesses the hardware device directly
+
+### 5. Verify Configuration
+
+```bash
+# Confirm gain settings
+amixer -c 0 cget numid=52  # should show values=8
+amixer -c 0 cget numid=53  # should show values=8
+amixer -c 0 cget numid=61  # should show values=1 (Left Left)
+
+# Confirm sound card info
+cat /proc/asound/cards
+# Should display: 0 [rockchipes8388 ]: rockchip-es8388
+
+# Recording test (speak into the onboard mic for 5 seconds)
+arecord -D default -f S16_LE -r 16000 -c 1 -d 5 test.wav
+
+# Playback test (plug in headphones)
+aplay -D default test.wav
+```
+
+### 6. Run the AI Program
+
+```bash
+./your_chat_bot_x.x.x.elf
+```
+
+## Persistent Configuration on Boot
+
+`amixer` settings are lost after reboot. Write them to a startup script:
+
+```bash
+sudo tee /etc/profile.d/es8388_audio.sh << 'EOF'
+#!/bin/bash
+# ES8388 audio gain and phase configuration for AI voice
+amixer -c 0 cset numid=52 8 > /dev/null 2>&1  # Left Capture Volume max
+amixer -c 0 cset numid=53 8 > /dev/null 2>&1  # Right Capture Volume max
+amixer -c 0 cset numid=61 1 > /dev/null 2>&1  # ADC Data Select: Left Left
+EOF
+sudo chmod +x /etc/profile.d/es8388_audio.sh
+```
+
+Alternatively, save the current state with `alsactl store` (if supported by the system):
+
+```bash
+sudo alsactl store 0
+```
+
+## Notes
+
+- Onboard MIC sensitivity is limited (−42 dB); best for near-field use (within 30 cm)
+- For far-field speech recognition, consider replacing the microphone with a higher-sensitivity one (−26 dB class) or adding a pre-amplifier module
+- Plugging/unplugging a 3.5 mm headphone jack may affect the microphone routing; verify with a live test after configuration
+- VAD threshold is set to `TKL_AUDIO_VAD_LOW` (−80 dB); if false triggers occur due to ambient noise, change it back to `TKL_AUDIO_VAD_MID` (−60 dB)
 
 ---
 
+# SDL Display and Camera Cross-Compilation Notes (RK3576)
 
-### Supported Target Platforms
-| Name                  | Support Status | Introduction                                                 | Debug log serial port |
-| --------------------- | -------------- | ------------------------------------------------------------ | --------------------- |
-| Ubuntu                | Supported      | Can be run directly on Linux hosts such as ubuntu.           |                       |
-| Tuya T2                    | Supported      | Supported Module List: [T2-U](https://developer.tuya.com/en/docs/iot/T2-U-module-datasheet?id=Kce1tncb80ldq) | Uart2/115200          |
-| Tuya T3                    | Supported      | Supported Module List: [T3-U](https://developer.tuya.com/en/docs/iot/T3-U-Module-Datasheet?id=Kdd4pzscwf0il) [T3-U-IPEX](https://developer.tuya.com/en/docs/iot/T3-U-IPEX-Module-Datasheet?id=Kdn8r7wgc24pt) [T3-2S](https://developer.tuya.com/en/docs/iot/T3-2S-Module-Datasheet?id=Ke4h1uh9ect1s) [T3-3S](https://developer.tuya.com/en/docs/iot/T3-3S-Module-Datasheet?id=Kdhkyow9fuplc) [T3-E2](https://developer.tuya.com/en/docs/iot/T3-E2-Module-Datasheet?id=Kdirs4kx3uotg) etc. | Uart1/460800          |
-| Tuya T5                  | Supported      | Supported Module List: [T5-E1](https://developer.tuya.com/en/docs/iot/T5-E1-Module-Datasheet?id=Kdar6hf0kzmfi) [T5-E1-IPEX](https://developer.tuya.com/en/docs/iot/T5-E1-IPEX-Module-Datasheet?id=Kdskxvxe835tq) etc. | Uart1/460800          |
-| ESP32/ESP32C3/ESP32S3 | Supported      |                                                              | Uart0/115200          |
-| LN882H                | Supported      |                                                              | Uart1/921600          |
-| BK7231N               | Supported      | Supported Module List:  [CBU](https://developer.tuya.com/en/docs/iot/cbu-module-datasheet?id=Ka07pykl5dk4u)  [CB3S](https://developer.tuya.com/en/docs/iot/cb3s?id=Kai94mec0s076) [CB3L](https://developer.tuya.com/en/docs/iot/cb3l-module-datasheet?id=Kai51ngmrh3qm) [CB3SE](https://developer.tuya.com/en/docs/iot/CB3SE-Module-Datasheet?id=Kanoiluul7nl2) [CB2S](https://developer.tuya.com/en/docs/iot/cb2s-module-datasheet?id=Kafgfsa2aaypq) [CB2L](https://developer.tuya.com/en/docs/iot/cb2l-module-datasheet?id=Kai2eku1m3pyl) [CB1S](https://developer.tuya.com/en/docs/iot/cb1s-module-datasheet?id=Kaij1abmwyjq2) [CBLC5](https://developer.tuya.com/en/docs/iot/cblc5-module-datasheet?id=Ka07iqyusq1wm) [CBLC9](https://developer.tuya.com/en/docs/iot/cblc9-module-datasheet?id=Ka42cqnj9r0i5) [CB8P](https://developer.tuya.com/en/docs/iot/cb8p-module-datasheet?id=Kahvig14r1yk9) etc. | Uart2/115200          |
+## SDL Display
 
-# Documentation
+### Prebuilt Library Details
 
-For more TuyaOpen-related documentation, please refer to the [TuyaOpen Developer Guide](https://tuyaopen.ai/docs/about-tuyaopen).
+`platform/LINUX/tuyaos_adapter/src/tkl_display/libs/RK3576/SDL2/libSDL2.a` is reused from the Raspberry Pi build (AArch64 architecture). The following backends are confirmed present via symbol table inspection (`nm`):
 
-## License
+| Backend | Status |
+|---------|--------|
+| X11 | ✓ Compiled in (shows a window under a desktop environment) |
+| KMS/DRM | ✓ Compiled in (drives the display directly without a desktop) |
+| OFFSCREEN | ✓ Compiled in |
+| DUMMY | ✓ Compiled in |
+| Wayland | ✗ Not compiled in |
 
-Distributed under the Apache License Version 2.0. For more information, see `LICENSE`.
+> Note: The `SDL_config.h` header shows `#undef` for these backends, which is misleading — the symbol table (`nm`) is the authoritative source.
 
-## Contribute Code
+SDL selects a backend automatically based on priority: X11 is used when the `DISPLAY` environment variable is set; KMS/DRM is used when no desktop is present.
 
-If you are interested in the TuyaOpen and wish to contribute to its development and become a code contributor, please first read the [Contribution Guide](https://tuyaopen.ai/docs/contribute/contribute-guide).
+### Runtime Environment Variables
 
-## Disclaimer and Liability Clause
+```bash
+# Desktop (X11) — show a window (default behavior, usually no override needed)
+export SDL_VIDEODRIVER=x11
+./your_chat_bot_x.x.x.elf
 
-Users should be clearly aware that this project may contain submodules developed by third parties. These submodules may be updated independently of this project. Considering that the frequency of updates for these submodules is uncontrollable, this project cannot guarantee that these submodules are always the latest version. Therefore, if users encounter problems related to submodules when using this project, it is recommended to update them as needed or submit an issue to this project.
+# Headless — drive a KMS/DRM screen directly
+export SDL_VIDEODRIVER=kmsdrm
+./your_chat_bot_x.x.x.elf
 
-If users decide to use this project for commercial purposes, they should fully recognize the potential functional and security risks involved. In this case, users should bear all responsibility for any functional and security issues, perform comprehensive functional and safety tests to ensure that it meets specific business needs. Our company does not accept any liability for direct, indirect, special, incidental, or punitive damages caused by the user's use of this project or its submodules.
+# Fully offscreen — no rendering to any display
+export SDL_VIDEODRIVER=offscreen
+./your_chat_bot_x.x.x.elf
+```
 
-## Related Links
+---
 
-- Arduino for TuyaOpen: [https://github.com/tuya/arduino-TuyaOpen](https://github.com/tuya/arduino-TuyaOpen)
-- Luanode for tuyaopen：[https://github.com/tuya/luanode-TuyaOpen](https://github.com/tuya/luanode-TuyaOpen)
-- **TuyaOpen Dev Skills** (Cursor AI workflows: env, build, flash, device auth, etc.): [github.com/tuya/TuyaOpen-dev-skills](https://github.com/tuya/TuyaOpen-dev-skills) — import as a remote rule or clone: `https://github.com/tuya/TuyaOpen-dev-skills.git`
+## Camera (V4L2)
+
+### Device Node
+
+The RK3576 ISP pipeline exposes multiple `/dev/videoX` nodes. The **video capture output node** is typically not `/dev/video0`. The default in `RK3576.config` is:
+
+```
+CONFIG_CAMERA_V4L2_DEVNODE="/dev/video73"
+```
+
+Confirm the actual node before running:
+
+```bash
+# List all video devices and their capabilities
+v4l2-ctl --list-devices
+
+# Check whether a node supports capture (has Video Capture capability)
+v4l2-ctl -d /dev/video73 --all | grep -i "capture\|format"
+
+# List supported formats and resolutions
+v4l2-ctl -d /dev/video73 --list-formats-ext
+```
+
+If `/dev/video73` does not exist or lacks capture capability, update `RK3576.config`:
+
+```
+CONFIG_CAMERA_V4L2_DEVNODE="/dev/videoN"   # replace with the actual node
+```
+
+### Resolution Configuration
+
+Camera output resolution in `RK3576.config`:
+
+```
+CONFIG_COMP_AI_VIDEO_WIDTH=1280
+CONFIG_COMP_AI_VIDEO_HEIGHT=720
+```
+
+Adjust to match your camera's actual capability; a mismatch causes V4L2 to return `EINVAL`.
+
+### Cross-Compilation Notes
+
+V4L2 is a kernel interface using standard Linux UAPI headers — **no extra dependencies are required for cross-compilation**. The `aarch64-none-linux-gnu` toolchain includes all necessary headers. The only thing to confirm is that the target board kernel has the relevant driver enabled (`CONFIG_VIDEO_V4L2`).

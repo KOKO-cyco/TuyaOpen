@@ -1,110 +1,208 @@
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/c128362b-eb25-4512-b5f2-ad14aae2395c.jpg" width="100%" >
-</p>
+# RK3576 + ES8388 板载麦克风音频配置指南
 
-<p align="center">
-  <a href="https://tuyaopen.ai/zh/docs/quick-start/enviroment-setup">快速开始</a> ·
-  <a href="https://developer.tuya.com/cn/docs/iot/ai-agent-management?id=Kdxr4v7uv4fud">涂鸦 AI Agent</a> ·
-  <a href="https://tuyaopen.ai/zh/docs/about-tuyaopen">文档中心</a> ·
-  <a href="https://tuyaopen.ai/zh/docs/hardware-specific/t5-ai-board/overview-t5-ai-board">硬件资源</a>
-</p>
+## 问题背景
 
-<p align="center">
-    <a href="https://github.com/tuya/TuyaOpen/actions/workflows/check-build-apps.yml" target="_blank">
-        <img src="https://github.com/tuya/TuyaOpen/actions/workflows/check-build-apps.yml/badge.svg"
-            alt="TuyaOpen Check Build"></a>
-    <a href="https://tuyaopen.ai" target="_blank">
-        <img alt="Static Badge" src="https://img.shields.io/badge/Product-F04438"></a>
-    <a href="https://tuyaopen.ai/zh/pricing" target="_blank">
-        <img alt="Static Badge" src="https://img.shields.io/badge/free-pricing?logo=free&color=%20%23155EEF&label=pricing&labelColor=%20%23528bff"></a>
-    <a href="https://discord.gg/cbGrBjx7" target="_blank">
-        <img src="https://img.shields.io/badge/Discord-Join%20Chat-5462eb?logo=discord&labelColor=%235462eb&logoColor=%23f5f5f5&color=%235462eb"
-            alt="chat on Discord"></a>
-    <a href="https://www.youtube.com/@tuya2023" target="_blank">
-        <img src="https://img.shields.io/badge/YouTube-Subscribe-red?logo=youtube&labelColor=white"
-            alt="Subscribe on YouTube"></a>
-    <a href="https://x.com/tuyasmart" target="_blank">
-        <img src="https://img.shields.io/twitter/follow/tuyasmart?logo=X&color=%20%23f5f5f5"
-            alt="follow on X(Twitter)"></a>
-    <a href="https://www.linkedin.com/company/tuya-smart/" target="_blank">
-        <img src="https://custom-icon-badges.demolab.com/badge/LinkedIn-0A66C2?logo=linkedin-white&logoColor=fff"
-            alt="follow on LinkedIn"></a>
-    <a href="https://github.com/tuya/tuyaopen/graphs/commit-activity?branch=dev" target="_blank">
-        <img alt="Commits last month (dev branch)" src="https://img.shields.io/github/commit-activity/m/tuya/tuyaopen/dev?labelColor=%2332b583&color=%2312b76a"></a>
-    <a href="https://github.com/langgenius/dify/" target="_blank">
-        <img alt="Issues closed" src="https://img.shields.io/github/issues-search?query=repo%3Atuya%2Ftuyaopen%20is%3Aclosed&label=issues%20closed&labelColor=%20%237d89b0&color=%20%235d6b98"></a>
-</p>
+在立创 RK3576 开发板上运行 TuyaOpen AI Chat Bot 时，板载麦克风（ES8388 codec）默认配置下存在以下问题：
 
-<p align="center">
-  <a href="./README.md"><img alt="README in English" src="https://img.shields.io/badge/English-d9d9d9"></a>
-  <a href="./README_zh.md"><img alt="简体中文版自述文件" src="https://img.shields.io/badge/简体中文-d9d9d9"></a>
-</p>
+1. **板载 MIC 灵敏度低**：数据手册标称 -42dB，远场语音识别偏吃力
+2. **ES8388 默认 PGA 增益不足**：仅 +9dB，不够激进
+3. **双声道反相**：左右声道下混为 mono 时信号抵消
+4. **ALSA 配置不当**：采样率/设备路由问题导致无声或音色异常
 
+## 解决方案
 
-## 概述
-TuyaOpen 赋能下一代 AI 智能体硬件：以灵活跨平台 C/C++ SDK 支持 涂鸦T系列 WIFI/蓝牙芯片、树莓派、ESP32 等设备，搭配涂鸦云低延迟多模态 AI（拖拽工作流），集成顶尖模型，简化开放式 AI-IoT 生态搭建。
+### 1. 提高 ES8388 采集模拟增益
 
-![TuyaOpen One Pager](https://images.tuyacn.com/fe-static/docs/img/207eb9a0-5583-4f04-a71d-1917cbefc5ba.png)
+```bash
+# 左声道 Capture Volume 拉满（+24dB）
+amixer -c 0 cset numid=52 8
 
-### 🚀 使用 TuyaOpen，你可以：
-- 开发具备语音技术的硬件产品，如 `ASR`（Automatic Speech Recognition）、`KWS`（Keyword Spotting）、`TTS`（Text-to-Speech）、`STT`（Speech-to-Text）
-- 集成主流 LLMs 及 AI 平台，包括 `Deepseek`、`ChatGPT`、`Claude`、`Gemini` 等
-- 构建具备 `多模态AI能力` 的智能设备，包括文本、语音、视觉和基于传感器的功能
-- 创建自定义产品，并无缝连接至涂鸦云，实现 `远程控制`、`监控` 和 `OTA 升级`
-- 开发兼容 `Google Home` 和 `Amazon Alexa` 的设备
-- 设计自定义的 `Powered by Tuya` 硬件
-- 支持广泛的硬件应用，包括 `蓝牙`、`Wi-Fi`、`以太网` 等多种连接方式
-- 受益于强大的内置 `安全性`、`设备认证` 和 `数据加密` 能力
+# 右声道 Capture Volume 拉满（+24dB）
+amixer -c 0 cset numid=53 8
+```
 
-无论你是在开发智能家居产品、工业 IoT 解决方案，还是定制 AI 应用，TuyaOpen 都能为你提供快速入门和跨平台扩展的工具与示例。
+### 2. 修正左右反相问题
 
+```bash
+# ADC Data Select 设为 "Left Left"，避免反相抵消
+amixer -c 0 cset numid=61 1
+```
 
+### 3. 停止 PipeWire（避免音频路由冲突）
 
-## 系统组成
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/220c9d84-d5f1-4976-b910-b63e415e9e03.png" width="80%" >
-</p>
+```bash
+systemctl --user stop pipewire pipewire-pulse wireplumber pipewire.socket pipewire-pulse.socket
+```
 
-### TuyaOpen SDK 详细框架栈
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/25713212-9840-4cf5-889c-6f55476a59f9.jpg" width="80%" >
-</p>
+如需开机自动禁用：
+
+```bash
+systemctl --user disable pipewire.socket pipewire-pulse.socket pipewire wireplumber
+systemctl --user mask pipewire.socket pipewire-pulse.socket
+```
+
+### 4. 配置 ALSA 默认设备
+
+编辑 `/etc/asound.conf`：
+
+```bash
+sudo tee /etc/asound.conf << 'EOF'
+pcm.!default {
+    type plug
+    slave {
+        pcm "hw:0,0"
+        rate 48000
+        channels 2
+        format S16_LE
+    }
+}
+
+ctl.!default {
+    type hw
+    card 0
+}
+EOF
+```
+
+关键点：
+- ES8388 原生支持 48kHz，强制 slave 跑在 48kHz 可避免音色异常（尖锐/变调）
+- `type plug` 自动处理应用程序 16kHz mono 与硬件 48kHz stereo 之间的转换
+- 不使用 PipeWire，程序直接访问硬件设备
+
+### 5. 验证配置
+
+```bash
+# 确认增益设置
+amixer -c 0 cget numid=52  # 应为 values=8
+amixer -c 0 cget numid=53  # 应为 values=8
+amixer -c 0 cget numid=61  # 应为 values=1 (Left Left)
+
+# 确认声卡信息
+cat /proc/asound/cards
+# 应显示: 0 [rockchipes8388 ]: rockchip-es8388
+
+# 录音测试（拔掉耳机，对着板载麦克风说话，5秒自动停止）
+arecord -D default -f S16_LE -r 16000 -c 1 -d 5 test.wav
+
+# 播放测试（插上耳机）
+aplay -D default test.wav
+```
+
+### 6. 运行 AI 程序
+
+```bash
+# 确保无耳机插入时录音（板载麦克风不受耳机影响，配置正确后可同时使用）
+./your_chat_bot_x.x.x.elf
+```
+
+## 开机持久化
+
+amixer 设置重启后会丢失，需写入启动脚本：
+
+```bash
+sudo tee /etc/profile.d/es8388_audio.sh << 'EOF'
+#!/bin/bash
+# ES8388 audio gain and phase configuration for AI voice
+amixer -c 0 cset numid=52 8 > /dev/null 2>&1  # Left Capture Volume max
+amixer -c 0 cset numid=53 8 > /dev/null 2>&1  # Right Capture Volume max
+amixer -c 0 cset numid=61 1 > /dev/null 2>&1  # ADC Data Select: Left Left
+EOF
+sudo chmod +x /etc/profile.d/es8388_audio.sh
+```
+
+或使用 `alsactl store` 保存当前状态（需系统支持）：
+
+```bash
+sudo alsactl store 0
+```
+
+## 注意事项
+
+- 板载 MIC 灵敏度有限（-42dB），适合近场（30cm 内）对话
+- 如需远场语音识别，建议硬件上更换高灵敏度麦克风（-26dB 级别）或加前置放大模块
+- 3.5mm 耳机插拔可能影响麦克风路由，配置完成后实测确认
+- VAD 阈值已设为 `TKL_AUDIO_VAD_LOW`（-80dB），如环境噪音导致误触发可改回 `TKL_AUDIO_VAD_MID`（-60dB）
 
 ---
 
-### 支持的目标平台
-| Name                  | Support Status | Introduction                                                 | Debug log serial port |
-| --------------------- | -------------- | ------------------------------------------------------------ | --------------------- |
-| Ubuntu                | Supported      | 可直接运行于如 ubuntu 等 Linux 主机。                        |                       |
-| Tuya T2               | Supported      | 支持的模块列表: [T2-U](https://developer.tuya.com/en/docs/iot/T2-U-module-datasheet?id=Kce1tncb80ldq) | Uart2/115200          |
-| Tuya T3               | Supported      | 支持的模块列表: [T3-U](https://developer.tuya.com/en/docs/iot/T3-U-Module-Datasheet?id=Kdd4pzscwf0il) [T3-U-IPEX](https://developer.tuya.com/en/docs/iot/T3-U-IPEX-Module-Datasheet?id=Kdn8r7wgc24pt) [T3-2S](https://developer.tuya.com/en/docs/iot/T3-2S-Module-Datasheet?id=Ke4h1uh9ect1s) [T3-3S](https://developer.tuya.com/en/docs/iot/T3-3S-Module-Datasheet?id=Kdhkyow9fuplc) [T3-E2](https://developer.tuya.com/en/docs/iot/T3-E2-Module-Datasheet?id=Kdirs4kx3uotg) 等 | Uart1/460800          |
-| Tuya T5               | Supported      | 支持的模块列表: [T5-E1](https://developer.tuya.com/en/docs/iot/T5-E1-Module-Datasheet?id=Kdar6hf0kzmfi) [T5-E1-IPEX](https://developer.tuya.com/en/docs/iot/T5-E1-IPEX-Module-Datasheet?id=Kdskxvxe835tq) 等 | Uart1/460800          |
-| ESP32/ESP32C3/ESP32S3 | Supported      |                                                              | Uart0/115200          |
-| LN882H                | Supported      |                                                              | Uart1/921600          |
-| BK7231N               | Supported      | 支持的模块列表: [CBU](https://developer.tuya.com/en/docs/iot/cbu-module-datasheet?id=Ka07pykl5dk4u) [CB3S](https://developer.tuya.com/en/docs/iot/cb3s?id=Kai94mec0s076) [CB3L](https://developer.tuya.com/en/docs/iot/cb3l-module-datasheet?id=Kai51ngmrh3qm) [CB3SE](https://developer.tuya.com/en/docs/iot/CB3SE-Module-Datasheet?id=Kanoiluul7nl2) [CB2S](https://developer.tuya.com/en/docs/iot/cb2s-module-datasheet?id=Kafgfsa2aaypq) [CB2L](https://developer.tuya.com/en/docs/iot/cb2l-module-datasheet?id=Kai2eku1m3pyl) [CB1S](https://developer.tuya.com/en/docs/iot/cb1s-module-datasheet?id=Kaij1abmwyjq2) [CBLC5](https://developer.tuya.com/en/docs/iot/cblc5-module-datasheet?id=Ka07iqyusq1wm) [CBLC9](https://developer.tuya.com/en/docs/iot/cblc9-module-datasheet?id=Ka42cqnj9r0i5) [CB8P](https://developer.tuya.com/en/docs/iot/cb8p-module-datasheet?id=Kahvig14r1yk9) 等 | Uart2/115200          |
+# SDL 显示与摄像头交叉编译说明（RK3576）
 
-# 开发者文档
+## SDL 显示
 
-更多 TuyaOpen 相关文档，请参考 [TuyaOpen 开发者指南](https://tuyaopen.ai/docs/about-tuyaopen)。
+### 预编译库说明
 
-## 许可证
+`platform/LINUX/tuyaos_adapter/src/tkl_display/libs/RK3576/SDL2/libSDL2.a` 复用自 Raspberry Pi 构建，架构为 AArch64。通过符号表实际确认编译进去的后端为：
 
-本项目基于 Apache License Version 2.0 发布。更多信息请参见 `LICENSE`。
+| 后端 | 状态 |
+|------|------|
+| X11 | ✓ 编译进去（可在桌面环境显示窗口） |
+| KMS/DRM | ✓ 编译进去（可直驱屏幕，无需桌面） |
+| OFFSCREEN | ✓ 编译进去 |
+| DUMMY | ✓ 编译进去 |
+| Wayland | ✗ 未编译 |
 
+> 注：`SDL_config.h` 头文件中的 `#undef` 与实际库不符，以 `nm` 符号表为准。
 
+SDL 会按优先级自动选择后端：有 `DISPLAY` 环境变量时走 X11，无桌面时走 KMS/DRM。
 
-## 代码贡献
+### 运行时环境变量
 
-如果你对 TuyaOpen 感兴趣，并希望参与开发成为代码贡献者，请先阅读 [贡献指南](https://tuyaopen.ai/docs/contribute/contribute-guide)。
+```bash
+# 桌面环境（X11）下显示窗口（默认行为，一般无需手动指定）
+export SDL_VIDEODRIVER=x11
+./your_chat_bot_x.x.x.elf
 
-## 免责声明
+# 无桌面，直接驱动 KMS/DRM 屏幕
+export SDL_VIDEODRIVER=kmsdrm
+./your_chat_bot_x.x.x.elf
 
-用户需明确知晓，本项目可能包含由第三方开发的子模块。这些子模块可能会独立于本项目进行更新。鉴于这些子模块的更新频率不可控，本项目无法保证其始终为最新版本。因此，若用户在使用本项目过程中遇到与子模块相关的问题，建议根据需要自行更新，或向本项目提交 issue。
+# 完全离屏，不渲染到任何显示器
+export SDL_VIDEODRIVER=offscreen
+./your_chat_bot_x.x.x.elf
+```
 
-如用户决定将本项目用于商业用途，应充分认识到其中可能存在的功能和安全风险。在此情况下，用户应对所有功能和安全问题自行承担责任，并进行全面的功能和安全性测试，以确保其满足特定业务需求。本公司不对因用户使用本项目或其子模块而导致的任何直接、间接、特殊、偶发或惩罚性损害承担责任。
+---
 
-## 相关链接
+## 摄像头（V4L2）
 
-- Arduino for TuyaOpen: [https://github.com/tuya/arduino-TuyaOpen](https://github.com/tuya/arduino-TuyaOpen)
-- Luanode for TuyaOpen：[https://github.com/tuya/luanode-TuyaOpen](https://github.com/tuya/luanode-TuyaOpen)
-- **TuyaOpen Dev Skills**（Cursor AI 开发技能：环境、编译、烧录、设备授权等）：[github.com/tuya/TuyaOpen-dev-skills](https://github.com/tuya/TuyaOpen-dev-skills) — 可在 Cursor 中以 Remote Rule 导入或克隆仓库：`https://github.com/tuya/TuyaOpen-dev-skills.git`
+### 设备节点说明
+
+RK3576 的 ISP 处理管线会在 `/dev/videoX` 下生成多个节点，**视频数据输出节点**通常不是 `/dev/video0`。RK3576 配置中默认使用：
+
+```
+CONFIG_CAMERA_V4L2_DEVNODE="/dev/video73"
+```
+
+运行前确认实际节点：
+
+```bash
+# 列出所有视频节点及其功能
+v4l2-ctl --list-devices
+
+# 查看指定节点是否可采集（有 Video Capture 能力）
+v4l2-ctl -d /dev/video73 --all | grep -i "capture\|format"
+
+# 枚举支持的格式和分辨率
+v4l2-ctl -d /dev/video73 --list-formats-ext
+```
+
+如果 `/dev/video73` 不存在或无采集能力，修改 `RK3576.config`：
+
+```
+CONFIG_CAMERA_V4L2_DEVNODE="/dev/videoN"   # 替换为实际节点
+```
+
+### 分辨率配置
+
+`RK3576.config` 中摄像头输出分辨率：
+
+```
+CONFIG_COMP_AI_VIDEO_WIDTH=1280
+CONFIG_COMP_AI_VIDEO_HEIGHT=720
+```
+
+根据实际摄像头能力调整，不匹配时 V4L2 会报 `EINVAL`。
+
+### 交叉编译注意事项
+
+V4L2 是内核接口，使用标准 Linux UAPI 头文件，**交叉编译无额外依赖**，`aarch64-none-linux-gnu` 工具链自带所需头文件。唯一需要确认的是目标板内核是否启用了对应驱动（`CONFIG_VIDEO_V4L2`）。
