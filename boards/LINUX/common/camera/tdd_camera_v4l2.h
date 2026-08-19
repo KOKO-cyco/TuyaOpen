@@ -1,6 +1,6 @@
 /**
  * @file tdd_camera_v4l2.h
- * @brief V4L2 (UVC) camera TDD adapter for TDL camera manager.
+ * @brief V4L2 camera TDD adapter for TDL camera manager, shared by LINUX boards.
  */
 
 #ifndef __TDD_CAMERA_V4L2_H__

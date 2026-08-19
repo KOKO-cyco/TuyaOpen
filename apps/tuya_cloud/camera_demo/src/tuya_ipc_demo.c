@@ -29,12 +29,215 @@ static uint32_t g_offset = 0;
 static uint32_t g_is_key_frame = 0;
 static FILE *g_fp = NULL;
 
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+/*
+ * Live camera path. The board registers a V4L2 camera whose TDD drives the SoC
+ * H.264 encoder, so the frames arriving here are already an Annex-B stream and
+ * go straight into the same ring buffer the P2P pull callback drains. When no
+ * camera opens, everything below stays idle and the file player takes over.
+ */
+#include "tdl_camera_manage.h"
+#include "tuya_ring_buffer.h"
+#include "tuya_ipc_p2p.h"
+
+extern uint64_t tuya_p2p_misc_get_current_time_ms(void);
+
+#ifndef CAMERA_NAME
+#define CAMERA_NAME "camera_dvp"
+#endif
+
+/* Keep the encoded I-frame under MAX_MEDIA_FRAME_SIZE (300KB): the ring buffer
+ * and the P2P send path both refuse anything larger, and a dropped I-frame
+ * leaves the peer unable to recover. 1080p I-frames measure well over 300KB on
+ * this sensor, so 720p is the highest resolution this pipeline can carry. */
+#define LIVE_CAM_WIDTH   1280
+#define LIVE_CAM_HEIGHT  720
+#define LIVE_CAM_FPS     25
+/* One number describes the stream: it drives the encoder, sizes the ring buffer
+ * (max_frame_size = min(kbps*1024*3/16, 300KB)) and is what the App is told.
+ * Matches the P2P send window, which TUYA_APP_Start provisions for 1 Mbps —
+ * encoding above that only produces frames the transport has to drop. */
+#define LIVE_CAM_KBPS    1024
+/* Two seconds between I-frames. Shortening this to one second was measured to
+ * make things worse, not better: an I-frame here costs 10-20x a P-frame, so
+ * doubling their rate ate most of the bitrate budget and left the P-frames
+ * starved. The GOP is still the worst-case freeze after a resync, but paying
+ * that occasionally beats degrading every second of the stream. Driven into
+ * the encoder and declared to the App from this one value so they cannot
+ * drift; the driver rescales it if the sensor's real frame rate differs. */
+#define LIVE_CAM_GOP     (LIVE_CAM_FPS * 2)
+
+static TDL_CAMERA_HANDLE_T s_lin_cam = NULL;
+static RING_BUFFER_USER_HANDLE_T s_lin_ring_w = NULL;
+static RING_BUFFER_USER_HANDLE_T s_lin_ring_r = NULL;
+static BOOL_T s_lin_ring_ready = FALSE;
+static BOOL_T s_lin_cam_running = FALSE;
+
+/**
+ * @brief Encoded H.264 frame from the camera TDD.
+ *
+ * Runs on the capture thread, so it only copies into the ring buffer and
+ * returns; the P2P sender pulls from the other end at its own pace.
+ */
+static OPERATE_RET __lin_encoded_frame_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame)
+{
+    (void)hdl;
+
+    if (frame == NULL || frame->data == NULL || frame->data_len == 0) {
+        return OPRT_INVALID_PARM;
+    }
+    if (!s_lin_ring_ready) {
+        return OPRT_OK;
+    }
+
+    uint64_t ts = tuya_p2p_misc_get_current_time_ms();
+
+    return tuya_ipc_ring_buffer_append_data_with_timestamp(
+        s_lin_ring_w, frame->data, frame->data_len,
+        frame->is_i_frame ? E_VIDEO_I_FRAME : E_VIDEO_PB_FRAME, ts * 1000ULL, ts);
+}
+
+/**
+ * @brief Open the registered camera and ask it for H.264.
+ * @return OPRT_OK when live video is available
+ */
+static OPERATE_RET __lin_camera_open(void)
+{
+    TDL_CAMERA_CFG_T cfg;
+    TDL_CAMERA_DEV_INFO_T info;
+    OPERATE_RET rt;
+
+    if (s_lin_cam_running) {
+        return OPRT_OK;
+    }
+
+    s_lin_cam = tdl_camera_find_dev((char *)CAMERA_NAME);
+    if (s_lin_cam == NULL) {
+        PR_WARN("camera '%s' not registered, falling back to demo file", CAMERA_NAME);
+        return OPRT_NOT_FOUND;
+    }
+
+    /* Ask before assuming: a node without a hardware encoder behind it cannot
+     * give H.264, and silently streaming nothing is worse than saying so. */
+    memset(&info, 0, sizeof(info));
+    if (tdl_camera_dev_get_info(s_lin_cam, &info) == OPRT_OK && info.supported_fmts != 0 &&
+        !(info.supported_fmts & TDL_CAMERA_FMT_H264)) {
+        PR_WARN("camera '%s' has no H264 output (supported_fmts=0x%x), falling back to demo file", CAMERA_NAME,
+                info.supported_fmts);
+        s_lin_cam = NULL;
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.width = LIVE_CAM_WIDTH;
+    cfg.height = LIVE_CAM_HEIGHT;
+    cfg.fps = LIVE_CAM_FPS;
+    cfg.bitrate_kbps = LIVE_CAM_KBPS;
+    cfg.gop = LIVE_CAM_GOP;
+    cfg.out_fmt = TDL_CAMERA_FMT_H264;
+    cfg.get_encoded_frame_cb = __lin_encoded_frame_cb;
+
+    rt = tdl_camera_dev_open(s_lin_cam, &cfg);
+    if (rt != OPRT_OK) {
+        PR_ERR("tdl_camera_dev_open failed: %d, falling back to demo file", rt);
+        s_lin_cam = NULL;
+        return rt;
+    }
+
+    s_lin_cam_running = TRUE;
+    PR_NOTICE("live camera started: %dx%d @%dfps H264", LIVE_CAM_WIDTH, LIVE_CAM_HEIGHT, LIVE_CAM_FPS);
+    return OPRT_OK;
+}
+
+static void __lin_camera_close(void)
+{
+    if (s_lin_cam && s_lin_cam_running) {
+        (void)tdl_camera_dev_close(s_lin_cam);
+        s_lin_cam_running = FALSE;
+        PR_NOTICE("live camera stopped");
+    }
+}
+
+/**
+ * @brief Pull one encoded frame for the P2P sender.
+ * @return OPRT_OK when a frame was written into @p media_frame
+ */
+static int __lin_camera_get_frame(MEDIA_FRAME *media_frame)
+{
+    RING_BUFFER_NODE_T frame;
+
+    if (!s_lin_cam_running || !s_lin_ring_ready) {
+        return -1;
+    }
+
+    /* Copied out under the ring's lock: the capture thread reuses slots in
+     * place, so copying after the pointer is handed back is a race. */
+    if (tuya_ipc_ring_buffer_read_frame(s_lin_ring_r, media_frame->data, MAX_MEDIA_FRAME_SIZE, &frame) == OPRT_OK) {
+        media_frame->size = frame.size;
+        media_frame->type = (frame.type == E_VIDEO_I_FRAME) ? eVideoIFrame : eVideoPBFrame;
+        media_frame->pts = frame.timestamp;
+        media_frame->timestamp = (uint32_t)frame.timestamp;
+        return 0;
+    }
+
+    /* Ring empty: yield briefly so the caller does not spin. */
+    tal_system_sleep(5);
+    return -1;
+}
+
+/**
+ * @brief Tell P2P what the live stream actually is
+ * @return none
+ * @note Without this the App renders the stream at whatever default it assumes,
+ *       which distorts the picture when that aspect ratio is not the sensor's.
+ *       Audio stays zeroed on purpose: this path has no microphone uplink.
+ */
+static void __lin_init_p2p_av_info(void)
+{
+    TRANS_IPC_AV_INFO_T av_info;
+    OPERATE_RET rt;
+
+    memset(&av_info, 0, sizeof(av_info));
+    /* Single sensor stream serves both clarity levels for now. */
+    for (int i = 0; i < 2; i++) {
+        int s = (i == 0) ? eIpcStreamVideoMain : eIpcStreamVideoSub;
+        av_info.video_codec[s] = TY_AV_CODEC_VIDEO_H264;
+        av_info.fps[s] = LIVE_CAM_FPS;
+        av_info.gop[s] = LIVE_CAM_GOP;
+        av_info.bitrate[s] = LIVE_CAM_KBPS;
+        av_info.width[s] = LIVE_CAM_WIDTH;
+        av_info.height[s] = LIVE_CAM_HEIGHT;
+    }
+
+    rt = tuya_ipc_init_trans_av_info(&av_info);
+    if (rt != OPRT_OK) {
+        PR_ERR("tuya_ipc_init_trans_av_info failed: %d", rt);
+    }
+}
+#endif /* ENABLE_CAMERA_V4L2 */
+
 /**
  * @brief Initialize demo video file
  * @return none
  */
 void tuya_ipc_demo_start(void)
 {
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+    {
+        RING_BUFFER_INIT_PARAM_T rp = {0};
+        rp.bitrate = LIVE_CAM_KBPS;
+        rp.fps = LIVE_CAM_FPS;
+        rp.max_buffer_seconds = 2;
+        if (tuya_ipc_ring_buffer_init(0, 0, E_IPC_STREAM_VIDEO_MAIN, &rp) == OPRT_OK) {
+            s_lin_ring_w = tuya_ipc_ring_buffer_open(0, 0, E_IPC_STREAM_VIDEO_MAIN, E_RBUF_WRITE);
+            s_lin_ring_r = tuya_ipc_ring_buffer_open(0, 0, E_IPC_STREAM_VIDEO_MAIN, E_RBUF_READ);
+            s_lin_ring_ready = (s_lin_ring_w != NULL && s_lin_ring_r != NULL) ? TRUE : FALSE;
+            PR_NOTICE("ring_buffer live video %s", s_lin_ring_ready ? "ready" : "open fail");
+        }
+        __lin_init_p2p_av_info();
+    }
+#endif
+
     if (getcwd(g_demo_path, sizeof(g_demo_path)) == NULL) {
         PR_ERR("getcwd failed");
         return;
@@ -165,7 +368,19 @@ int demo_on_get_video_frame_callback(MEDIA_FRAME *media_frame)
 {
     int ret = 0;
 
-    if (media_frame == NULL || g_video_buf == NULL || g_file_size <= 0) {
+    if (media_frame == NULL) {
+        return -1;
+    }
+
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+    /* Live camera wins whenever it is running; the file player below is only
+     * the fallback for boards without one. */
+    if (s_lin_cam_running) {
+        return __lin_camera_get_frame(media_frame);
+    }
+#endif
+
+    if (g_video_buf == NULL || g_file_size <= 0) {
         return -1;
     }
 
@@ -213,6 +428,12 @@ int demo_on_get_audio_frame_callback(MEDIA_FRAME *media_frame)
  */
 int demo_on_live_video_start_callback(void)
 {
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+    /* Opening on demand keeps the sensor and encoder idle until someone
+     * actually watches. A failure here is not fatal: the demo file still
+     * plays, so the App gets a picture either way. */
+    (void)__lin_camera_open();
+#endif
     return 0;
 }
 
@@ -222,6 +443,9 @@ int demo_on_live_video_start_callback(void)
  */
 int demo_on_live_video_stop_callback(void)
 {
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+    __lin_camera_close();
+#endif
     return 0;
 }
 
@@ -252,6 +476,37 @@ int demo_on_recv_audio_frame_callback(MEDIA_FRAME *media_frame)
 {
     (void)media_frame;
     return 0;
+}
+
+/**
+ * @brief Ask the encoder for a key frame now
+ * @return 0 when the encoder accepted the request
+ */
+int demo_on_request_i_frame_callback(void)
+{
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+    if (s_lin_cam != NULL && tdl_camera_dev_request_i_frame(s_lin_cam) == OPRT_OK) {
+        return 0;
+    }
+#endif
+    return -1;
+}
+
+/**
+ * @brief Move the encoder's target bitrate
+ * @param[in] kbps requested bitrate
+ * @return 0 when the encoder accepted the change
+ */
+int demo_on_set_video_bitrate_callback(uint32_t kbps)
+{
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+    if (s_lin_cam != NULL && tdl_camera_dev_set_bitrate(s_lin_cam, kbps) == OPRT_OK) {
+        return 0;
+    }
+#else
+    (void)kbps;
+#endif
+    return -1;
 }
 
 #else /* !SYSTEM_LINUX — T5: embedded demo H264 or live GC2145 */
@@ -492,6 +747,8 @@ int demo_on_get_audio_frame_callback(MEDIA_FRAME *media_frame)
 #include "demo_media_event.h"
 #if defined(ENABLE_IPC_RING_BUFFER) && (ENABLE_IPC_RING_BUFFER == 1)
 #include "tuya_ring_buffer.h"
+
+extern uint64_t tuya_p2p_misc_get_current_time_ms(void);
 #endif
 #if defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1)
 #include "local_store.h"
@@ -1500,5 +1757,32 @@ int demo_on_recv_audio_frame_callback(MEDIA_FRAME *media_frame)
 }
 
 #endif /* CONFIG_CAMERA_DEMO_P2P_FILE_H264 */
+
+/**
+ * @brief Ask the encoder for a key frame now
+ * @return 0 when the encoder accepted the request
+ */
+int demo_on_request_i_frame_callback(void)
+{
+    if (s_cam != NULL && tdl_camera_dev_request_i_frame(s_cam) == OPRT_OK) {
+        return 0;
+    }
+    /* The file-playback demo has no encoder to ask, and a sensor driver
+     * without one places key frames on its own schedule. */
+    return -1;
+}
+
+/**
+ * @brief Move the encoder's target bitrate
+ * @param[in] kbps requested bitrate
+ * @return 0 when the encoder accepted the change
+ */
+int demo_on_set_video_bitrate_callback(uint32_t kbps)
+{
+    if (s_cam != NULL && tdl_camera_dev_set_bitrate(s_cam, kbps) == OPRT_OK) {
+        return 0;
+    }
+    return -1;
+}
 
 #endif /* OPERATING_SYSTEM == SYSTEM_LINUX */

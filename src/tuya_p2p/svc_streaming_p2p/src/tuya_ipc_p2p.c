@@ -30,7 +30,6 @@
 #define P2P_SESSION_IDLE    (0)
 #define P2P_SESSION_RUNNING (1)
 #define P2P_SESSION_CLOSING (2)
-#define P2P_SESSION_INITING (3)
 
 /* Tuya c2c intercom audio operations (sub-type of TY_C2C_CMD_IO_CTRL_AUDIO, high=8).
  * Align TuyaOS APP<->device speaker protocol. Adjust values per App cmd log if mismatched. */
@@ -89,6 +88,9 @@ typedef struct {
     int channel;
     char *p_rtp_buff;                         // RTP data buffer, reference size MTU+100
     int fix_len;                              // Supplementary private header data
+    /* Packets of the current frame already handed to the transport. Once this
+     * is non-zero the frame is partly on the wire and cannot be retried. */
+    int sent_pkts;
     char ext_head_buff[P2P_EXT_HEAD_MAX_LEN]; // According to extended video header protocol head+ext(8)+rtp_len
 } RTP_PACK_NAL_ARG_T;
 
@@ -108,6 +110,21 @@ typedef struct {
     int cur_read; // Current read length
     int flag;     // READ_HEADER_PART/READ_PAYLOAD_PART
 } P2P_DATA_PARSE_T;
+
+/*
+ * Rate control states, again from the draft.
+ *
+ * Hold is the one that was missing. After a decrease there is still a queue
+ * built up, and going straight back to increasing means climbing on top of a
+ * backlog that has not drained - the rate saws between the floor and a ceiling
+ * the link cannot hold. Hold keeps the rate still until the queue is actually
+ * empty, and only then hands over to increase.
+ */
+typedef enum {
+    RC_STATE_INCREASE = 0,
+    RC_STATE_HOLD,
+    RC_STATE_DECREASE,
+} RC_STATE_E;
 
 typedef struct {
     MUTEX_HANDLE cmutex;
@@ -143,6 +160,24 @@ typedef struct {
     uint32_t dbg_vsend_ok;                             // DBG: successful video RTP sends
     uint32_t dbg_vsend_skip;                           // DBG: skipped non-I before first key
     uint32_t dbg_vget_fail;                            // DBG: get-frame callback failures
+    uint32_t dbg_vsend_fail;                           // video sends that returned an error
+    uint32_t dbg_asend_fail;                           // audio sends that returned an error
+
+    /* Rate control: how full the video transport queue is, and the bitrate the
+     * encoder has been told to produce as a result. See __p2p_rate_control. */
+    uint32_t tx_fill_pct;      // occupancy of the video send queue, 0-100
+    uint32_t tx_full_cnt;      // times a frame did not fit, this session
+    uint32_t tx_max_frame;     // largest frame offered, sizes the queue floor
+    uint32_t rc_fill_peak;     // worst occupancy seen in the current window
+    uint32_t rc_fill_sum;      // occupancy accumulated over the window
+    uint32_t rc_fill_samples;  // samples behind rc_fill_sum
+    uint32_t rc_full_at_start; // tx_full_cnt when the window opened
+    uint32_t rc_warmup;        // windows skipped while the link settles
+    RC_STATE_E rc_state;       // increase / hold / decrease, see the draft
+    uint64_t rc_window_ms;     // when the current window opened
+    uint32_t rc_base_kbps;     // configured rate, the ceiling to return to
+    uint32_t rc_cur_kbps;      // rate currently commanded
+    uint64_t iframe_req_ms;    // last key frame request, to rate limit them
     BOOL_T video_frame_pending;                     // Hold last get_frame until RTP send succeeds
 
     tuya_p2p_rtc_disconnect_cb_t on_disconnect_callback;
@@ -153,6 +188,8 @@ typedef struct {
     tuya_p2p_rtc_live_video_cb_t on_live_audio_start_callback;
     tuya_p2p_rtc_live_video_cb_t on_live_audio_stop_callback;
     tuya_p2p_rtc_get_frame_cb_t  on_recv_audio_frame_callback;
+    tuya_p2p_rtc_req_i_frame_cb_t on_request_i_frame_callback;
+    tuya_p2p_rtc_set_bitrate_cb_t on_set_video_bitrate_callback;
     THREAD_HANDLE cmd_recv_proc_thread;   // Command receive thread handle
     THREAD_HANDLE video_send_proc_thread; // Video send thread handle
     THREAD_HANDLE audio_downlink_thread;  // Downlink audio (APP->spk) recv thread
@@ -200,7 +237,14 @@ void ctx_listen_thread_func(void *arg)
         PR_NOTICE("__p2p_deal_with_listen, session[%d]", session_id);
         p2p_deal_with_listen(session_id);
     }
-    PR_NOTICE("p2p listen task exit");
+    /*
+     * Clear the started flag on the way out. It is what p2p_rtc_listen_start
+     * checks, so leaving it set after the loop ends means nothing can ever
+     * accept a peer again - the device stays online and reachable, silently
+     * refusing every connection until the process is restarted.
+     */
+    g_listen_start = 0;
+    PR_ERR("p2p listen task exit - no further peers will be accepted until listen is restarted");
     return;
 }
 
@@ -238,29 +282,35 @@ OPERATE_RET p2p_rtc_listen_stop()
     return OPRT_OK;
 }
 
-P2P_SESSION_T *p2p_get_idle_session(int *index)
-{
-    int status = -1;
-    int i = 0;
-    if (sg_p2p_session == NULL)
-        return NULL;
-    PR_DEBUG("p2p_get_idle_session begin\n");
-    status = sg_p2p_session->status;
-    if (P2P_SESSION_IDLE == status) {
-        *index = i;
-        sg_p2p_session->status = P2P_SESSION_INITING;
-        return sg_p2p_session;
-    }
-    PR_DEBUG("p2p_get_idle_session end\n");
-    return NULL;
-}
-
 OPERATE_RET p2p_deal_with_listen(int session)
 {
     OPERATE_RET ret = OPRT_OK;
     BOOL_T userCheckEnable = FALSE;
 
     PR_NOTICE("__p2p_deal_with_listen, session[%d]", session);
+
+    // Every branch below dereferences the session context, so refuse the
+    // connection instead of faulting if it is not up yet.
+    if (NULL == sg_p2p_session) {
+        PR_ERR("p2p session not initialized, reject session[%d]", session);
+        __p2p_rtc_close(session, RTC_CLOSE_REASON_SESSION_FULL, NULL);
+        return OPRT_COM_ERROR;
+    }
+
+    /*
+     * There is one session context, so there can be one peer. Without this the
+     * second caller would overwrite the first one's session id and buffers in
+     * place - the original peer is never closed and the sender starts pushing
+     * its frames at whoever arrived last. The RTC layer is configured to admit
+     * only one today, which is what has been hiding this; the check belongs
+     * here anyway, where the single context actually lives.
+     */
+    if (P2P_SESSION_IDLE != sg_p2p_session->status) {
+        PR_WARN("session[%d] already active (status %d), reject session[%d]", sg_p2p_session->session,
+                sg_p2p_session->status, session);
+        __p2p_rtc_close(session, RTC_CLOSE_REASON_SESSION_FULL, NULL);
+        return OPRT_COM_ERROR;
+    }
 
     // First verify user information, close corresponding session if not qualified
     if (OPRT_OK != p2p_get_userinfo(session, 1)) {
@@ -272,9 +322,10 @@ OPERATE_RET p2p_deal_with_listen(int session)
             }
         }
         PR_ERR("Close session[%d]", session);
+        // Close just this session. Tearing the RTC stack down here would
+        // destroy the global message queue, worker and session mutex, so one
+        // rejected peer would leave P2P dead until the process restarts.
         __p2p_rtc_close(session, RTC_CLOSE_REASON_AUTH_FAIL, NULL);
-        tuya_p2p_rtc_notify_exit();
-        tuya_p2p_rtc_deinit();
         return OPRT_COM_ERROR;
     } else {
         // Once verification is successful, no more authentication exception handling
@@ -295,8 +346,13 @@ OPERATE_RET p2p_deal_with_listen(int session)
     sg_p2p_session->session = session;
     sg_p2p_session->status = P2P_SESSION_RUNNING;
     PR_NOTICE("create p2p sessions. cur online session num = %d", 1);
+    return OPRT_OK;
 
 RET:
+    /* The peer is connected as far as the RTC layer is concerned, so leaving
+     * without closing it strands the session: it never times out here and the
+     * App waits on a stream that will never start. */
+    __p2p_rtc_close(session, RTC_CLOSE_REASON_SESSION_FULL, NULL);
     return ret;
 }
 
@@ -319,7 +375,15 @@ OPERATE_RET p2p_get_userinfo(int session, int p2pType)
     int32_t tmpSize = 0;
     BOOL_T flag = FALSE;
     int timeout = P2P_RECV_TIMEOUT; // ms
-    int retry = P2P_CHECK_USER_TIMES * 6 / timeout;
+    /*
+     * P2P_CHECK_USER_TIMES is the budget for this handshake and reads "10s";
+     * the extra factor of six stretched it to a full minute, during which the
+     * listener is deaf and logs nothing, so a peer whose first packet went
+     * missing could not get in by retrying either - the app reports "failed to
+     * get the stream" and its retry button does nothing until the minute is up.
+     */
+    int retry = P2P_CHECK_USER_TIMES / timeout;
+    int total_read = 0;
 
     memset(&strUserInfo, 0x00, sizeof(P2P_CMD_PASSWD_T));
     read_buff = (char *)&strUserInfo;
@@ -367,6 +431,7 @@ OPERATE_RET p2p_get_userinfo(int session, int p2pType)
                 flag = TRUE;
                 break;
             } else if (sizeof(P2P_CMD_PASSWD_T) > (read_size + cur_read)) {
+                total_read += read_size;
                 cur_read += read_size;
                 read_size = sizeof(P2P_CMD_PASSWD_T) - cur_read;
             } else {
@@ -377,7 +442,11 @@ OPERATE_RET p2p_get_userinfo(int session, int p2pType)
     } // while (retry > 0)
 
     if (FALSE == flag) {
-        PR_ERR("get userinfo timeout session[%d]", session);
+        /* Say whether the peer was silent or just incomplete: ICE can report
+         * success while no payload ever crosses, and the two look identical
+         * from the app side. */
+        PR_ERR("get userinfo timeout session[%d]: %d of %d bytes arrived in %dms", session, total_read,
+               (int)sizeof(P2P_CMD_PASSWD_T), P2P_CHECK_USER_TIMES);
         return OPRT_COM_ERROR;
     }
 
@@ -583,7 +652,16 @@ OPERATE_RET p2p_send_rtp_data(int client, int channel, char *buff, int length)
         return OPRT_RESOURCE_NOT_READY;
     }
     if (ret > 0 && ret < length) {
-        return OPRT_RESOURCE_NOT_READY;
+        /*
+         * Part of this RTP packet is already on the wire. Reporting it as
+         * retryable makes the caller send the whole packet again, so the peer
+         * receives a truncated packet followed by a complete one and has to
+         * resynchronise. Nothing here can take those bytes back, so treat it
+         * as a hard error: the frame is abandoned and the next I-frame
+         * recovers the stream cleanly.
+         */
+        PR_ERR("partial write %d of %d on channel %d, frame abandoned", ret, length, channel);
+        return OPRT_COM_ERROR;
     }
     return OPRT_COM_ERROR;
 }
@@ -622,6 +700,13 @@ static void __p2p_ext_protocol_pack(int client, int type, char *p_result, int *p
                 (int16_t)sg_p2p_session->av_Info.height[curClirtyChn];
             *(int16_t *)&p_result[sizeof(C2C_AV_TRANS_FIXED_HEADER) + 6] =
                 (int16_t)sg_p2p_session->av_Info.fps[curClirtyChn];
+            /* DBG: ground truth for what geometry the App is actually told,
+             * in-band, per I-frame. Compare against the raw encoder output
+             * (see tkl_venc_mpp.c) to tell an App-side rendering/caching issue
+             * apart from a device-side one. */
+            PR_DEBUG("DBG video ext-header chn=%d w=%u h=%u fps=%u", curClirtyChn,
+                     sg_p2p_session->av_Info.width[curClirtyChn], sg_p2p_session->av_Info.height[curClirtyChn],
+                     sg_p2p_session->av_Info.fps[curClirtyChn]);
         } else {
             fix_len = sizeof(C2C_AV_TRANS_FIXED_HEADER) + 4;
             pav_Info->extension_length = 0;
@@ -643,11 +728,37 @@ static void __p2p_ext_protocol_pack(int client, int type, char *p_result, int *p
     return;
 }
 
+/*
+ * How much video may be waiting in the transport, expressed as playout time.
+ *
+ * The send queue is sized in bytes - about 520 kB for a 1 Mbps stream - which
+ * at that rate is four seconds of video. Anything sitting in it is latency the
+ * viewer sees, so filling it is not "buffering", it is falling four seconds
+ * behind. Measured on hardware the queue sat at 98% for minutes at a time.
+ *
+ * So the queue is bounded by time rather than by capacity: keep at most this
+ * much playout queued and shed frames beyond it. A live viewer wants to see
+ * now, not to eventually see everything.
+ */
+#define P2P_TX_LATENCY_BUDGET_MS 700u
+
+/* Multiples of the largest frame seen that the queue must always accept, so
+ * the budget can never shrink below what one key frame needs. */
+#define P2P_TX_KEYFRAME_ROOM 3u
+
+/**
+ * @brief May another frame of @p len be queued without falling too far behind?
+ *
+ * Also records how full the video queue is relative to that latency budget,
+ * which is the congestion signal the encoder bitrate is driven from.
+ */
 static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len)
 {
     OPERATE_RET ret = OPRT_OK;
     int sendFreeSize = 0;
     int writeSize = 0;
+
+    (void)client; /* one session, one transport - the id comes from the context */
 
     ret = tuya_p2p_rtc_check_buffer(sg_p2p_session->session, channel, (uint32_t *)&writeSize, NULL,
                                     (uint32_t *)&sendFreeSize);
@@ -655,17 +766,296 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
         return ret;
     }
 
+    if (channel == TUYA_VDATA_CHANNEL) {
+        /*
+         * writeSize is the backlog itself - "bytes written to the send buffer
+         * but not sent successfully", per tuya_p2p_rtc_check_buffer - and
+         * sendFreeSize is what is left of the queue. This used to subtract one
+         * from the other, which is meaningless: below half full the difference
+         * is negative and clamped to zero, above half full it climbs at twice
+         * the real rate. The controller therefore saw only 0 or 100 percent and
+         * nothing in between, and spent its time flipping between the two.
+         */
+        int used = writeSize;
+        uint32_t kbps = sg_p2p_session->rc_cur_kbps ? sg_p2p_session->rc_cur_kbps : 1024u;
+        /* kbps * ms / 8 == bytes of playout time */
+        int budget = (int)((kbps * P2P_TX_LATENCY_BUDGET_MS) / 8u);
+        int keyframe_room;
+
+        if ((uint32_t)len > sg_p2p_session->tx_max_frame) {
+            sg_p2p_session->tx_max_frame = (uint32_t)len;
+        }
+        /*
+         * A budget smaller than the frames being put in it is a trap. Derived
+         * purely from the bitrate, it shrinks every time the rate drops - at
+         * 256 kbps it is 22 kB, while a key frame here measures 15-24 kB. One
+         * key frame then exceeds the whole budget on its own, which reads as
+         * congestion, which lowers the rate, which shrinks the budget again.
+         * Observed doing exactly that on a LAN, where there was no congestion
+         * to find. Always leave room for a few of the largest frames seen.
+         */
+        keyframe_room = (int)(sg_p2p_session->tx_max_frame * P2P_TX_KEYFRAME_ROOM);
+        if (budget < keyframe_room) {
+            budget = keyframe_room;
+        }
+
+        /* Capacity is backlog plus free space; the budget is a slice of that
+         * expressed as time, and can never exceed the queue it lives in. */
+        if (budget > writeSize + sendFreeSize) {
+            budget = writeSize + sendFreeSize;
+        }
+        if (budget < 1) {
+            budget = 1;
+        }
+        sg_p2p_session->tx_fill_pct = (uint32_t)((int64_t)used * 100 / budget);
+        if (sg_p2p_session->tx_fill_pct > 100) {
+            sg_p2p_session->tx_fill_pct = 100;
+        }
+
+        /*
+         * Judged on the backlog already queued, not on whether this frame also
+         * fits. A key frame can be several times the budget on a slow link, and
+         * refusing it whenever it does not fit means the stream can never
+         * recover; letting it through when the queue is otherwise drained costs
+         * one frame of extra delay and gets the picture back.
+         */
+        if (used > budget) {
+            if ((sg_p2p_session->tx_full_cnt % 100) == 0) {
+                PR_WARN("video queue %d bytes over the %ums budget (%d), shedding frames", used,
+                        P2P_TX_LATENCY_BUDGET_MS, budget);
+            }
+            sg_p2p_session->tx_full_cnt++;
+            return OPRT_RESOURCE_NOT_READY;
+        }
+    }
+
     int need_size = (int)((double)len * 1.1); /* align TuyaOS svc_streaming_p2p check */
     if (need_size > sendFreeSize) {
-        static int retry_sum = 0; // Total retry count when buffer is full
-        if (retry_sum % 100 == 0) {
+        /* Per-session, not per-process: a function-level static would share one
+         * counter between the video and audio channels and never reset across
+         * connections, so the rate limit fires at unrelated moments. */
+        if ((sg_p2p_session->tx_full_cnt % 100) == 0) {
             PR_ERR("Check_Buffer not enough writeSize[%d] sendFreeSize[%d] len[%d] session[%d] channel[%d]", writeSize,
                    sendFreeSize, len, sg_p2p_session->session, channel);
         }
-        retry_sum++;
+        sg_p2p_session->tx_full_cnt++;
         ret = OPRT_RESOURCE_NOT_READY;
     }
     return ret;
+}
+
+/*
+ * Encoder rate control driven by the transport.
+ *
+ * The transport can only carry what the link allows. Left alone the encoder
+ * produces its configured bitrate regardless, so on a link that cannot take it
+ * the send queue fills, frames are discarded until the next key frame, and the
+ * key frame that follows - the largest frame there is - lands in a queue that
+ * is still full. That cycle repeats and the viewer sees repeated multi-second
+ * freezes rather than a picture that is merely softer.
+ *
+ * Queue occupancy is the signal: it rises before anything is lost, so acting
+ * on it keeps the stream continuous. Back off multiplicatively when it climbs
+ * or a frame did not fit, recover additively when it stays low - the usual
+ * asymmetry, because overshooting downward costs quality for a moment while
+ * overshooting upward costs frames.
+ */
+/*
+ * Constants follow draft-ietf-rmcat-gcc-02, the congestion control WebRTC uses
+ * for exactly this job. Two of them were originally picked by eye and both were
+ * wrong in the same direction - too violent:
+ *
+ *   - decrease was x0.75 where the draft recommends 0.85 (it allows 0.8-0.95).
+ *     Cutting a quarter at a time reaches the floor in five steps, which is
+ *     what the first hardware run did within five seconds of connecting.
+ *   - increase added a fixed 10% *of the configured rate*. That is a constant
+ *     step regardless of where the rate currently is, so at 256 kbps it was a
+ *     40% jump - straight back into the ceiling that had just failed. The draft
+ *     increases multiplicatively, at most 8% per second.
+ */
+#define RC_WINDOW_MS      1000u /* one decision per second: slower than the queue moves */
+#define RC_FILL_HIGH_PCT  70u   /* sustained, not a momentary spike */
+#define RC_FILL_LOW_PCT   20u
+#define RC_DOWN_NUM       85u   /* x0.85 on congestion, per the draft */
+#define RC_DOWN_DEN       100u
+#define RC_UP_NUM         108u  /* x1.08 per second while the link is clear */
+#define RC_UP_DEN         100u
+#define RC_MIN_PCT        25u   /* never fall below a quarter of the configured rate */
+#define RC_FILL_EVENTS_MIN 3u   /* shed frames in a window before believing congestion */
+
+/*
+ * Smallest change worth reprogramming the encoder for.
+ *
+ * Changing the bitrate is not free: the encoder is reconfigured and emits a
+ * fresh key frame, so a controller that nudges the rate every second spends a
+ * large part of the link on key frames it created itself. Measured, the output
+ * reached 1200-1400 kbps while the target was 256 kbps, with two key frames a
+ * second against a two second GOP.
+ *
+ * Kept below the algorithm's own step sizes (x0.85 down, x1.08 up) so it only
+ * filters noise - the Hold state is what actually keeps the number of changes
+ * down, by not changing anything at all while the queue drains.
+ */
+#define RC_MIN_CHANGE_PCT 5u
+/*
+ * Windows to let pass before acting. A session opens with a cold KCP window and
+ * a key frame, so the queue is briefly deep through no fault of the encoder;
+ * measured on hardware, reacting to that alone walked the rate from 1024 down
+ * to the floor within five seconds of connecting, then spent eight climbing
+ * back. Judge the link once it is actually running.
+ */
+#define RC_WARMUP_WINDOWS 2u
+
+static void __p2p_rate_control(P2P_SESSION_T *pSession)
+{
+    uint64_t now = (uint64_t)tal_system_get_millisecond();
+    uint32_t fills, want, floor_kbps, avg_fill;
+
+    if (pSession->on_set_video_bitrate_callback == NULL || pSession->rc_base_kbps == 0) {
+        return;
+    }
+    /* Averaged over the window, not peaked: a single deep moment is normal
+     * around a key frame and says nothing about what the link can carry. */
+    pSession->rc_fill_sum += pSession->tx_fill_pct;
+    pSession->rc_fill_samples++;
+    if (pSession->tx_fill_pct > pSession->rc_fill_peak) {
+        pSession->rc_fill_peak = pSession->tx_fill_pct;
+    }
+    if (pSession->rc_window_ms == 0) {
+        pSession->rc_window_ms = now;
+        pSession->rc_full_at_start = pSession->tx_full_cnt;
+        return;
+    }
+    if (now - pSession->rc_window_ms < RC_WINDOW_MS) {
+        return;
+    }
+
+    fills = pSession->tx_full_cnt - pSession->rc_full_at_start;
+    avg_fill = pSession->rc_fill_samples ? (pSession->rc_fill_sum / pSession->rc_fill_samples) : 0;
+    want = pSession->rc_cur_kbps;
+    floor_kbps = pSession->rc_base_kbps * RC_MIN_PCT / 100u;
+    if (floor_kbps == 0) {
+        floor_kbps = 1;
+    }
+
+    if (pSession->rc_warmup < RC_WARMUP_WINDOWS) {
+        pSession->rc_warmup++;
+    } else {
+        /*
+         * Sustained pressure only. A single shed frame is what one oversized
+         * key frame looks like on a link that is otherwise keeping up, and
+         * treating it as congestion walks the rate down a link that has plenty
+         * of room - measured doing so over a LAN.
+         */
+        BOOL_T overuse = (fills >= RC_FILL_EVENTS_MIN || avg_fill >= RC_FILL_HIGH_PCT) ? TRUE : FALSE;
+        BOOL_T drained = (avg_fill <= RC_FILL_LOW_PCT) ? TRUE : FALSE;
+
+        switch (pSession->rc_state) {
+        case RC_STATE_DECREASE:
+            /* Keep cutting while it is still congested; once the queue is back
+             * under control, hold rather than immediately climbing again. */
+            if (overuse) {
+                want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+            } else {
+                pSession->rc_state = RC_STATE_HOLD;
+            }
+            break;
+
+        case RC_STATE_HOLD:
+            /* Rate stays put until the backlog has genuinely gone. */
+            if (overuse) {
+                want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                pSession->rc_state = RC_STATE_DECREASE;
+            } else if (drained) {
+                pSession->rc_state = RC_STATE_INCREASE;
+            }
+            break;
+
+        case RC_STATE_INCREASE:
+        default:
+            if (overuse) {
+                want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                pSession->rc_state = RC_STATE_DECREASE;
+            } else if (drained && want < pSession->rc_base_kbps) {
+                want = want * RC_UP_NUM / RC_UP_DEN;
+            } else if (!drained) {
+                /* Neither congested nor empty: leave it alone. */
+                pSession->rc_state = RC_STATE_HOLD;
+            }
+            break;
+        }
+
+        if (want < floor_kbps) {
+            want = floor_kbps;
+        }
+        if (want > pSession->rc_base_kbps) {
+            want = pSession->rc_base_kbps;
+        }
+    }
+
+    if (want != pSession->rc_cur_kbps) {
+        uint32_t delta = (want > pSession->rc_cur_kbps) ? (want - pSession->rc_cur_kbps)
+                                                        : (pSession->rc_cur_kbps - want);
+
+        /* Worth a reconfiguration, or at the floor/ceiling where the exact
+         * value matters more than the size of the step. */
+        if (delta * 100u >= pSession->rc_cur_kbps * RC_MIN_CHANGE_PCT || want == floor_kbps ||
+            want == pSession->rc_base_kbps) {
+            /* No literal percent sign: the log formatter renders "%%" as '?'. */
+            PR_NOTICE("rate control: %u -> %u kbps [%s] (queue avg %u pct, peak %u pct, %u full events)",
+                      pSession->rc_cur_kbps, want,
+                      (pSession->rc_state == RC_STATE_DECREASE)
+                          ? "decrease"
+                          : ((pSession->rc_state == RC_STATE_HOLD) ? "hold" : "increase"),
+                      avg_fill, pSession->rc_fill_peak, fills);
+            if (pSession->on_set_video_bitrate_callback(want) == 0) {
+                pSession->rc_cur_kbps = want;
+            }
+        }
+    }
+
+    pSession->rc_window_ms = now;
+    pSession->rc_full_at_start = pSession->tx_full_cnt;
+    pSession->rc_fill_peak = pSession->tx_fill_pct;
+    pSession->rc_fill_sum = 0;
+    pSession->rc_fill_samples = 0;
+}
+
+/*
+ * Shortest gap between key frame requests.
+ *
+ * A key frame is the largest frame the encoder makes, so asking for one while
+ * the send queue is already full is the worst possible moment to add work. The
+ * congestion path retries every backoff interval, and without this it asked on
+ * every attempt: measured on hardware that produced 17 to 26 key frames in a
+ * single second against a 2 second GOP, driving output to 2.8 Mbps while the
+ * target was 432 kbps. The recovery mechanism was making the congestion it was
+ * recovering from. One request, then wait long enough to see whether it
+ * arrived and helped.
+ */
+#define P2P_IFRAME_REQ_MIN_GAP_MS 1500u
+
+/* Backlog considered drained enough to accept a key frame, in percent of the
+ * latency budget. */
+#define P2P_TX_DRAINED_PCT 40u
+
+/**
+ * @brief Ask the source for a key frame, if it can provide one on demand.
+ * @return TRUE when the request was accepted
+ */
+static BOOL_T __p2p_request_i_frame(P2P_SESSION_T *pSession)
+{
+    uint64_t now;
+
+    if (pSession->on_request_i_frame_callback == NULL) {
+        return FALSE;
+    }
+    now = (uint64_t)tal_system_get_millisecond();
+    if (pSession->iframe_req_ms != 0 && (now - pSession->iframe_req_ms) < P2P_IFRAME_REQ_MIN_GAP_MS) {
+        return FALSE;
+    }
+    pSession->iframe_req_ms = now;
+    return (pSession->on_request_i_frame_callback() == 0) ? TRUE : FALSE;
 }
 
 #define P2P_VIDEO_RTP_CLOCK_HZ 90
@@ -787,6 +1177,7 @@ static OPERATE_RET __p2p_pack_h265_rtp_and_send(int client, char *pData, int len
     rtp_pack_nal_arg.client = client;
     rtp_pack_nal_arg.channel = TUYA_VDATA_CHANNEL;
     rtp_pack_nal_arg.p_rtp_buff = sg_p2p_session->p_video_rtp_buff;
+    rtp_pack_nal_arg.sent_pkts = 0;
     memset(rtp_pack_nal_arg.ext_head_buff, 0, P2P_EXT_HEAD_MAX_LEN);
     __p2p_ext_protocol_pack(client, 0, rtp_pack_nal_arg.ext_head_buff, &rtp_pack_nal_arg.fix_len);
 
@@ -800,13 +1191,17 @@ static OPERATE_RET __p2p_pack_h265_rtp_and_send(int client, char *pData, int len
     uint32_t timestamp = __p2p_video_rtp_timestamp_ms90();
     pRtpDelegate = rtp_payload_encode_create(/*H265_PAY_LOAD*/ 95, "H265", seq, ssrc, &rtp_packer, &rtp_pack_nal_arg);
     ret = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
-    if (OPRT_OK != ret) {
-        PR_ERR("rtp_payload_encode_input h264 error:%d", ret);
-    }
     rtp_payload_encode_getinfo(pRtpDelegate, &sg_p2p_session->video_seq_num, &timestamp);
     rtp_payload_encode_destroy(pRtpDelegate);
+    if (0 != ret) {
+        /* Same rule as H264: a frame that is already partly transmitted must
+         * not be offered again. Also map the packer's raw -1 onto an OPRT code
+         * so the caller can tell retryable from terminal at all. */
+        PR_ERR("rtp_payload_encode_input h265 error:%d after %d packets", ret, rtp_pack_nal_arg.sent_pkts);
+        return (rtp_pack_nal_arg.sent_pkts == 0) ? OPRT_RESOURCE_NOT_READY : OPRT_COM_ERROR;
+    }
 
-    return ret;
+    return OPRT_OK;
 }
 
 /***********************************************************
@@ -851,6 +1246,7 @@ static OPERATE_RET __p2p_pack_h264_rtp_and_send(int client, char *pData, int len
     rtp_pack_nal_arg.client = client;
     rtp_pack_nal_arg.channel = TUYA_VDATA_CHANNEL;
     rtp_pack_nal_arg.p_rtp_buff = sg_p2p_session->p_video_rtp_buff;
+    rtp_pack_nal_arg.sent_pkts = 0;
     memset(rtp_pack_nal_arg.ext_head_buff, 0, P2P_EXT_HEAD_MAX_LEN);
     __p2p_ext_protocol_pack(client, 0, rtp_pack_nal_arg.ext_head_buff, &rtp_pack_nal_arg.fix_len);
 
@@ -865,10 +1261,17 @@ static OPERATE_RET __p2p_pack_h264_rtp_and_send(int client, char *pData, int len
     pRtpDelegate = rtp_payload_encode_create(/*H264_PAY_LOAD*/ 96, "H264", seq, ssrc, &rtp_packer, &rtp_pack_nal_arg);
     ret = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
     if (ret != 0) {
-        PR_ERR("rtp_payload_encode_input h264 error:%d", ret);
+        PR_ERR("rtp_payload_encode_input h264 error:%d after %d packets", ret, rtp_pack_nal_arg.sent_pkts);
         rtp_payload_encode_getinfo(pRtpDelegate, &sg_p2p_session->video_seq_num, &timestamp);
         rtp_payload_encode_destroy(pRtpDelegate);
-        return OPRT_RESOURCE_NOT_READY;
+        /*
+         * Retry only if nothing went out. A frame is emitted as many RTP
+         * packets, so once some of them are gone the peer has a fragment it
+         * will never complete; re-sending the frame from the start just adds a
+         * duplicate copy behind that fragment. Report it as unrecoverable so
+         * the caller drops the frame and waits for a clean one.
+         */
+        return (rtp_pack_nal_arg.sent_pkts == 0) ? OPRT_RESOURCE_NOT_READY : OPRT_COM_ERROR;
     }
     rtp_payload_encode_getinfo(pRtpDelegate, &sg_p2p_session->video_seq_num, &timestamp);
     rtp_payload_encode_destroy(pRtpDelegate);
@@ -981,6 +1384,7 @@ static OPERATE_RET __p2p_pack_g711_rtp_and_send(int client, char *pData, int len
     rtp_pack_nal_arg.client = client;
     rtp_pack_nal_arg.channel = TUYA_ADATA_CHANNEL;
     rtp_pack_nal_arg.p_rtp_buff = sg_p2p_session->p_audio_rtp_buff;
+    rtp_pack_nal_arg.sent_pkts = 0;
     memset(rtp_pack_nal_arg.ext_head_buff, 0, P2P_EXT_HEAD_MAX_LEN);
     __p2p_ext_protocol_pack(client, 1, rtp_pack_nal_arg.ext_head_buff, &rtp_pack_nal_arg.fix_len);
 
@@ -1006,13 +1410,14 @@ static OPERATE_RET __p2p_pack_g711_rtp_and_send(int client, char *pData, int len
     }
     pRtpDelegate = rtp_payload_encode_create(payload, codec_name, seq, ssrc, &rtp_packer, &rtp_pack_nal_arg);
     ret = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
-    if (OPRT_OK != ret) {
-        PR_ERR("rtp_payload_encode_input h264 error:%d", ret);
-    }
     rtp_payload_encode_getinfo(pRtpDelegate, &sg_p2p_session->audio_seq_num, &timestamp);
     rtp_payload_encode_destroy(pRtpDelegate);
+    if (0 != ret) {
+        PR_ERR("rtp_payload_encode_input %s error:%d after %d packets", codec_name, ret, rtp_pack_nal_arg.sent_pkts);
+        return (rtp_pack_nal_arg.sent_pkts == 0) ? OPRT_RESOURCE_NOT_READY : OPRT_COM_ERROR;
+    }
 
-    return ret;
+    return OPRT_OK;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1102,11 +1507,36 @@ static int __p2p_session_trans_video_start(P2P_SESSION_T *pSession)
     pSession->dbg_vsend_skip = 0;
     pSession->dbg_vget_fail = 0;
     pSession->video_frame_pending = FALSE;
+
+    /* Rate control starts from whatever the stream is configured to produce and
+     * only ever moves down from there, so pick the ceiling up here. */
+    pSession->rc_base_kbps = pSession->av_Info.bitrate[p2p_get_chn_idx(pSession->cur_clarity)];
+    pSession->rc_cur_kbps = pSession->rc_base_kbps;
+    pSession->rc_window_ms = 0;
+    pSession->rc_fill_peak = 0;
+    pSession->rc_fill_sum = 0;
+    pSession->rc_fill_samples = 0;
+    pSession->rc_warmup = 0;
+    pSession->rc_state = RC_STATE_INCREASE;
+    pSession->tx_max_frame = 0;
+    pSession->rc_full_at_start = pSession->tx_full_cnt;
+    pSession->iframe_req_ms = 0;
+
     if (pSession->on_live_video_start_callback) {
         (void)pSession->on_live_video_start_callback();
     }
     (void)tuya_ipc_media_stream_event_call(0, 0, MEDIA_STREAM_LIVE_VIDEO_START, NULL);
-    PR_DEBUG("session[%d] video start success (wait first I-frame)", pSession->session);
+
+    /*
+     * Nothing can be decoded before a key frame arrives, so ask for one now.
+     * Waiting for the next scheduled one costs up to a full GOP of black
+     * screen at the very moment the user is looking at the app.
+     */
+    if (__p2p_request_i_frame(pSession)) {
+        PR_DEBUG("session[%d] video start, key frame requested", pSession->session);
+    } else {
+        PR_DEBUG("session[%d] video start success (wait first I-frame)", pSession->session);
+    }
     return OPRT_OK;
 }
 
@@ -1982,7 +2412,11 @@ static void __p2p_cmd_recv_proc(void *pArg)
             continue;
         }
         if (P2P_SESSION_RUNNING != pSession->status) {
+            /* Yield like the other not-ready branches do. Spinning here burns a
+             * core for the whole authentication handshake, which is exactly
+             * when the listener needs the CPU. */
             tal_mutex_unlock(pSession->cmutex);
+            tal_system_sleep(5);
             continue;
         }
         tal_mutex_unlock(pSession->cmutex);
@@ -2046,7 +2480,11 @@ static void __p2p_media_send_proc(void *pArg)
             continue;
         }
         if (P2P_SESSION_RUNNING != status) {
+            /* Yield like the neighbouring not-ready branches. Spinning here
+             * burns a core for the whole INITING window, which is exactly when
+             * the listener and authentication need the CPU. */
             tal_mutex_unlock(pSession->cmutex);
+            tal_system_sleep(5);
             continue;
         }
 
@@ -2061,6 +2499,12 @@ static void __p2p_media_send_proc(void *pArg)
             continue;
         }
         tal_mutex_unlock(pSession->cmutex);
+
+        /* Once per window, turn what the transport queue has been doing into a
+         * bitrate the encoder can actually meet. */
+        if (P2P_VIDEO & cmd) {
+            __p2p_rate_control(pSession);
+        }
 
         /*
          * Align TuyaOS push path: audio must not be starved by video sleep/backoff.
@@ -2085,8 +2529,18 @@ static void __p2p_media_send_proc(void *pArg)
                         /* AAC path unused on this demo */
                     } else if (TY_AV_CODEC_AUDIO_G711A == type || TY_AV_CODEC_AUDIO_G711U == type ||
                                TY_AV_CODEC_AUDIO_PCM == type) {
-                        (void) __p2p_pack_g711_rtp_and_send(index, (char *)pAudioFrame->data, pAudioFrame->size,
-                                                              type);
+                        OPERATE_RET a_ret;
+
+                        a_ret = __p2p_pack_g711_rtp_and_send(index, (char *)pAudioFrame->data, pAudioFrame->size, type);
+                        if (OPRT_OK != a_ret) {
+                            /* Uplink audio dying is otherwise invisible: the
+                             * intercom just goes quiet with nothing logged. */
+                            pSession->dbg_asend_fail++;
+                            if ((pSession->dbg_asend_fail % 50) == 1) {
+                                PR_WARN("audio send failed count = [%u] ret=%d", pSession->dbg_asend_fail, a_ret);
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -2098,8 +2552,6 @@ static void __p2p_media_send_proc(void *pArg)
             } else {
                 MEDIA_FRAME *pMediaFrame = &sg_p2p_session->media_frame;
                 OPERATE_RET buf_ret;
-                int video_fps;
-                uint32_t pace_ms;
                 uint32_t backoff_ms;
 
                 if (!pSession->video_frame_pending) {
@@ -2122,12 +2574,34 @@ static void __p2p_media_send_proc(void *pArg)
                 }
                 if (TRUE == pSession->video_need_iframe) {
                     pSession->video_frame_pending = FALSE;
+                    /*
+                     * Waiting for a key frame and this is not one. Ask for it
+                     * only once the backlog has actually gone, so the largest
+                     * frame the encoder makes arrives into a queue with room
+                     * for it rather than on top of the congestion it is meant
+                     * to recover from. Rate limited inside as well, since this
+                     * runs for every frame discarded while waiting.
+                     */
+                    if (pSession->tx_fill_pct < P2P_TX_DRAINED_PCT) {
+                        (void)__p2p_request_i_frame(pSession);
+                    }
                     continue;
                 }
 
                 buf_ret = __p2p_check_free_buffer_size(index, TUYA_VDATA_CHANNEL, (int)pMediaFrame->size);
                 if (buf_ret != OPRT_OK) {
-                    /* Align live preview: drop until next I-frame when send queue full */
+                    /*
+                     * Backlog is over budget: stop feeding and let it drain.
+                     *
+                     * Deliberately no key frame request here. A key frame is
+                     * the largest frame there is - on a 300 kbps link a 30 kB
+                     * one is most of a second's budget - so asking for it while
+                     * the queue is already too deep adds the biggest possible
+                     * object to the thing being drained. Measured: the encoder
+                     * put out 1200-1400 kbps against a 256 kbps target that
+                     * way, and most of that congestion was self-inflicted. The
+                     * request happens below instead, once there is room.
+                     */
                     pSession->video_need_iframe = TRUE;
                     pSession->video_frame_pending = FALSE;
                     /* Keep audio alive while video TX is congested */
@@ -2147,20 +2621,31 @@ static void __p2p_media_send_proc(void *pArg)
                     if ((pSession->dbg_vsend_ok % 100) == 0) {
                         PR_DEBUG("session send video cnt [%d]", (int)pSession->dbg_vsend_ok);
                     }
-                    video_fps = sg_p2p_session->av_Info.fps[0];
-                    if (video_fps <= 0 || video_fps > 60) {
-                        video_fps = 15;
-                    }
-                    pace_ms = (uint32_t)(1000 / video_fps);
-                    if (pace_ms < 20) {
-                        pace_ms = 20;
-                    }
-                    tal_system_sleep(pace_ms);
+                    /*
+                     * No pacing sleep here on purpose. The frame source already
+                     * sets the rate: on_get_video_frame_callback fails when the
+                     * ring is empty and that path sleeps. Sleeping a frame
+                     * period after every send caps the drain rate at exactly the
+                     * capture rate, so any backlog - a large I-frame, a stalled
+                     * send window - can never be worked off and the reader keeps
+                     * falling behind until the ring skips frames.
+                     */
                 } else {
-                    static uint32_t s_vsend_fail_cnt = 0;
-                    s_vsend_fail_cnt++;
-                    if ((s_vsend_fail_cnt % 10) == 1) {
-                        PR_ERR("video send failed count = [%d]", (int)s_vsend_fail_cnt);
+                    pSession->dbg_vsend_fail++;
+                    if ((pSession->dbg_vsend_fail % 10) == 1) {
+                        PR_ERR("video send failed count = [%u] ret=%d", pSession->dbg_vsend_fail, op_ret);
+                    }
+                    /*
+                     * Only a full send queue is worth retrying the same frame
+                     * for. Everything else - an oversized access unit, a frame
+                     * that is not valid Annex-B - fails identically no matter
+                     * how often it is offered, and keeping it pending retries
+                     * it forever: the stream stops for good on a single bad
+                     * frame. Drop it and take the next one instead.
+                     */
+                    if (OPRT_RESOURCE_NOT_READY != op_ret) {
+                        PR_WARN("dropping unsendable frame (%u bytes, ret %d)", (uint32_t)pMediaFrame->size, op_ret);
+                        pSession->video_frame_pending = FALSE;
                     }
                     backoff_ms = (P2P_AUDIO & cmd) ? 20 : 500;
                     tal_system_sleep(backoff_ms);
@@ -2195,12 +2680,15 @@ int __p2p_session_all_stop(P2P_SESSION_T *pSession)
 {
     BOOL_T video_was_on = FALSE;
 
-    tal_mutex_lock(pSession->cmutex);
+    /* Checked before the lock, not after: taking pSession->cmutex is itself a
+     * dereference, so the old order faulted on exactly the input it meant to
+     * reject - and then faulted again on the way out. */
     if (NULL == pSession) {
         PR_ERR("param error");
-        tal_mutex_unlock(pSession->cmutex);
         return OPRT_INVALID_PARM;
     }
+
+    tal_mutex_lock(pSession->cmutex);
     if (P2P_VIDEO & pSession->cmd) {
         pSession->cmd &= ~P2P_VIDEO;
         video_was_on = TRUE;
@@ -2220,19 +2708,23 @@ int __p2p_session_all_stop(P2P_SESSION_T *pSession)
 
 int __p2p_session_release_va(P2P_SESSION_T *pSession)
 {
+    tuya_p2p_rtc_disconnect_cb_t notify;
+
     // All functions closed
     PR_DEBUG("release va session[%d]", pSession->session);
     tal_mutex_lock(pSession->cmutex);
-    if (pSession->p_video_rtp_buff) {
-        Free(pSession->p_video_rtp_buff);
-        pSession->p_video_rtp_buff = NULL;
-    }
-    if (pSession->p_audio_rtp_buff) {
-        Free(pSession->p_audio_rtp_buff);
-        pSession->p_audio_rtp_buff = NULL;
-    }
-    // memset(&pSession->session, 0x00, sizeof(P2P_SESSION_T) - OFFSET(P2P_SESSION_T, session));//Clear variables
-    // outside the lock memset(&pSession->str_P2p_auth, 0, sizeof(pSession->str_P2p_auth));
+    /*
+     * The RTP staging buffers deliberately outlive the session.
+     *
+     * The sender packs and transmits with the session mutex released - it has
+     * to, since a frame takes milliseconds to push out and holding the lock
+     * that long would stall command handling. Freeing the buffers here, from
+     * whichever thread saw the peer go away, therefore pulls memory out from
+     * under a memcpy that is already running. They are P2P_RTP_PACK_LEN each,
+     * so keeping them for the life of the process costs a couple of kilobytes
+     * and removes the race outright; p2p_prepare_*_send_resource already
+     * returns early when they are present, so a reconnect simply reuses them.
+     */
     pSession->cur_clarity = TY_VIDEO_CLARITY_INNER_HIGH;
     pSession->status = P2P_SESSION_IDLE;
     pSession->cmd = P2P_IDLE;
@@ -2257,15 +2749,33 @@ int __p2p_session_release_va(P2P_SESSION_T *pSession)
     pSession->dbg_vsend_ok = 0;
     pSession->dbg_vsend_skip = 0;
     pSession->dbg_vget_fail = 0;
-    if (pSession->on_disconnect_callback)
-        pSession->on_disconnect_callback(); // Notify upper layer when receiving disconnect signal from cloud
+    notify = pSession->on_disconnect_callback;
     tal_mutex_unlock(pSession->cmutex);
+
+    /* Outside the lock: this runs application code, which is free to call back
+     * into P2P and would deadlock against the mutex we were holding. */
+    if (notify) {
+        notify();
+    }
     return 0;
 }
 
 OPERATE_RET p2p_init(const TUYA_IPC_P2P_VAR_T *p_var)
 {
     OPERATE_RET ret = OPRT_OK;
+
+    /*
+     * Refuse a second bring-up rather than overwrite the live session pointer.
+     * The threads started by the first call read this same global on every
+     * iteration, so replacing it hands them a session that is still being
+     * filled in - they were seen reading a NULL thread handle out of the fresh
+     * allocation and exiting - while the previous mutex, thread handles and
+     * 300 kB frame buffer become unreachable.
+     */
+    if (NULL != sg_p2p_session) {
+        PR_ERR("p2p already initialised, ignoring re-init");
+        return OPRT_COM_ERROR;
+    }
 
     // Initialize session information
     sg_p2p_session = (P2P_SESSION_T *)Malloc(sizeof(P2P_SESSION_T));
@@ -2346,6 +2856,8 @@ OPERATE_RET p2p_init(const TUYA_IPC_P2P_VAR_T *p_var)
     sg_p2p_session->on_live_audio_start_callback = p_var->on_live_audio_start_callback;
     sg_p2p_session->on_live_audio_stop_callback = p_var->on_live_audio_stop_callback;
     sg_p2p_session->on_recv_audio_frame_callback = p_var->on_recv_audio_frame_callback;
+    sg_p2p_session->on_request_i_frame_callback = p_var->on_request_i_frame_callback;
+    sg_p2p_session->on_set_video_bitrate_callback = p_var->on_set_video_bitrate_callback;
     sg_p2p_session->on_live_video_start_callback = p_var->on_live_video_start_callback;
     sg_p2p_session->on_live_video_stop_callback = p_var->on_live_video_stop_callback;
 
@@ -2359,6 +2871,21 @@ RET:
         p2p_release_audio_send_resource(sg_p2p_session);
     }
     __p2p_thread_exit(sg_p2p_session->cmd_recv_proc_thread);
+    /*
+     * The media send thread is started before the frame buffers are allocated,
+     * so it is running whenever one of those allocations is what failed. Only
+     * cmd_recv was stopped here, leaving it to poll a session that would never
+     * be completed.
+     */
+    __p2p_thread_exit(sg_p2p_session->video_send_proc_thread);
+    /*
+     * The session itself stays allocated and the pointer stays set, which the
+     * guard at the top of this function turns into a refusal of any later
+     * attempt. That is deliberate: tal_thread_delete only asks a thread to
+     * stop, it does not wait for it, so both threads are still dereferencing
+     * this global on their way out and freeing it here would be a use after
+     * free. A failed bring-up is terminal for the process by design.
+     */
     return ret;
 }
 
@@ -2601,6 +3128,7 @@ int rtp_pack_packet_handler(void *param, const void *packet, int bytes, uint32_t
     if (p2p_send_rtp_data(nal_arg->client, nal_arg->channel, nal_arg->p_rtp_buff, total) != OPRT_OK) {
         return -1;
     }
+    nal_arg->sent_pkts++;
     return 0;
 }
 

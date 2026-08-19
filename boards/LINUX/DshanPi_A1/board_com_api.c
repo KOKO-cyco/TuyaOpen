@@ -1,7 +1,7 @@
 /**
  * @file board_com_api.c
  * @author Tuya Inc.
- * @brief Implementation of common board-level hardware registration APIs for Raspberry Pi platform.
+ * @brief Implementation of common board-level hardware registration APIs for DshanPi A1 platform.
  *
  * This file provides the implementation for initializing and registering hardware
  * components on the Linux platform, with primary focus on ALSA audio support.
@@ -18,6 +18,10 @@
 
 #if defined(ENABLE_KEYBOARD_INPUT) && (ENABLE_KEYBOARD_INPUT == 1)
 #include "tdd_button_keyboard.h"
+#endif
+
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+#include "tdd_camera_v4l2.h"
 #endif
 
 #include "board_com_api.h"
@@ -43,7 +47,7 @@
 ***********************************************************/
 
 /**
- * @brief Registers ALSA audio device for Raspberry Pi platform
+ * @brief Registers ALSA audio device for DshanPi A1 platform
  *
  * This function initializes and registers the ALSA audio driver for audio
  * capture (microphone) and playback (speaker) functionality. It is only
@@ -107,7 +111,7 @@ static OPERATE_RET __board_register_audio(void)
     rt = tdd_audio_alsa_register(AUDIO_CODEC_NAME, alsa_cfg);
     if (OPRT_OK != rt) {
         PR_WARN("Failed to register ALSA audio driver: %d", rt);
-        PR_WARN("This is expected on Raspberry Pi systems without audio hardware");
+        PR_WARN("This is expected on DshanPi A1 systems without audio hardware");
         PR_WARN("Application will continue without audio functionality");
         return rt;
     }
@@ -130,9 +134,9 @@ static OPERATE_RET __board_register_audio(void)
 }
 
 /**
- * @brief Registers button hardware for Raspberry Pi platform
+ * @brief Registers button hardware for DshanPi A1 platform
  *
- * On Raspberry Pi, we use keyboard input instead of physical buttons.
+ * On DshanPi A1, we use keyboard input instead of physical buttons.
  * Press 'S' key to trigger conversation.
  *
  * @return OPERATE_RET - OPRT_OK on success
@@ -160,9 +164,9 @@ static OPERATE_RET __board_register_button(void)
 }
 
 /**
- * @brief Registers LED hardware for Raspberry Pi platform
+ * @brief Registers LED hardware for DshanPi A1 platform
  *
- * Note: LED support on Raspberry Pi may require platform-specific implementation
+ * Note: LED support on DshanPi A1 may require platform-specific implementation
  * or GPIO access. This is a placeholder for future implementation.
  *
  * @return OPERATE_RET - OPRT_OK on success
@@ -174,12 +178,46 @@ static OPERATE_RET __board_register_led(void)
 }
 
 /**
- * @brief Registers all the hardware peripherals on the Raspberry Pi platform.
- * 
+ * @brief Registers V4L2 camera for DshanPi A1 board
+ *
+ * The driver itself lives in boards/LINUX/common/camera and is shared with the
+ * other Linux boards; only the device node differs per board.
+ *
+ * @return OPERATE_RET - OPRT_OK on success
+ */
+static OPERATE_RET __board_register_camera(void)
+{
+    OPERATE_RET rt = OPRT_OK;
+
+#if defined(ENABLE_CAMERA_V4L2) && (ENABLE_CAMERA_V4L2 == 1)
+    #if defined(CAMERA_NAME)
+        #if defined(CAMERA_V4L2_DEVNODE)
+            PR_INFO("Registering V4L2 camera: %s (%s)", CAMERA_NAME, CAMERA_V4L2_DEVNODE);
+            rt = tdd_camera_v4l2_register(CAMERA_NAME, CAMERA_V4L2_DEVNODE);
+        #else
+            PR_INFO("Registering V4L2 camera: %s (/dev/video0)", CAMERA_NAME);
+            rt = tdd_camera_v4l2_register(CAMERA_NAME, "/dev/video0");
+        #endif
+        if (OPRT_OK != rt) {
+            PR_WARN("Failed to register V4L2 camera: %d", rt);
+            return rt;
+        }
+    #else
+        PR_WARN("CAMERA_NAME not defined, skipping camera registration");
+    #endif
+#endif
+
+    return rt;
+}
+
+/**
+ * @brief Registers all the hardware peripherals on the DshanPi A1 platform.
+ *
  * This function initializes and registers hardware components including:
  * - ALSA audio device (if ENABLE_AUDIO_ALSA is enabled)
  * - Button
  * - LED
+ * - Camera (if ENABLE_CAMERA_V4L2 is enabled)
  *
  * @return Returns OPRT_OK on success, or an appropriate error code on failure.
  */
@@ -187,7 +225,7 @@ OPERATE_RET board_register_hardware(void)
 {
     OPERATE_RET rt = OPRT_OK;
 
-    PR_INFO("Registering Raspberry Pi platform hardware...");
+    PR_INFO("Registering DshanPi A1 platform hardware...");
 
     // Register audio device (ALSA)
     rt = __board_register_audio();
@@ -208,7 +246,13 @@ OPERATE_RET board_register_hardware(void)
         PR_WARN("LED registration failed: %d", rt);
     }
 
-    PR_INFO("Raspberry Pi platform hardware registration completed");
+    // Register camera (V4L2)
+    rt = __board_register_camera();
+    if (OPRT_OK != rt) {
+        PR_WARN("Camera registration failed: %d", rt);
+    }
+
+    PR_INFO("DshanPi A1 platform hardware registration completed");
 
     return OPRT_OK;
 }

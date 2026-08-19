@@ -24,10 +24,23 @@
  * and license, otherwise the demo cannot work.
  *
  */
+/* A local, git-ignored tuya_config_secrets.h wins over the defaults below, so a
+ * per-board licence can be dropped in without editing (and accidentally
+ * committing) this file. Same mechanism switch_demo uses. */
+#if __has_include("tuya_config_secrets.h")
+#include "tuya_config_secrets.h"
+#endif
+
 // clang-format off
+#ifndef TUYA_PRODUCT_ID
 #define TUYA_PRODUCT_ID         "sjzw8nclwoitx0rv"                        // Please change your product id
+#endif
+#ifndef TUYA_OPENSDK_UUID
 #define TUYA_OPENSDK_UUID       "uuidxxxxxxxxxxxxxxxx"                    // Please change the correct uuid
+#endif
+#ifndef TUYA_OPENSDK_AUTHKEY
 #define TUYA_OPENSDK_AUTHKEY    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        // Please change the correct authkey
+#endif
 /**
  * @brief PINCODE for AP provisioning
  * 

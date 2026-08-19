@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>读 ikcp.c：在 UDP 上做可靠传输，要想清楚的五件事</title>
+<style>
+  :root {
+    --bg: #fafbfc;
+    --surface: #ffffff;
+    --surface-2: #f1f4f7;
+    --text: #1c2126;
+    --text-dim: #5f6b76;
+    --border: #dde3e9;
+    --accent: #1f5d8c;
+    --accent-soft: #e8f1f8;
+    --good: #2c6a4a;
+    --good-soft: #e9f3ee;
+    --bad: #8f3326;
+    --bad-soft: #fbecea;
+    --warn: #8a6116;
+    --warn-soft: #fbf3e2;
+    --code-bg: #1a2027;
+    --code-text: #dfe6ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181c;
+      --surface: #1b2126;
+      --surface-2: #222a31;
+      --text: #e5eaef;
+      --text-dim: #98a4b0;
+      --border: #2c353d;
+      --accent: #63a8d8;
+      --accent-soft: #16232e;
+      --good: #7cc39c;
+      --good-soft: #17241d;
+      --bad: #dd8d80;
+      --bad-soft: #2a1d1b;
+      --warn: #d6ab5e;
+      --warn-soft: #262017;
+      --code-bg: #0e1216;
+      --code-text: #d5dce3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.75; font-size: 16px;
+  }
+  .wrap { max-width: 840px; margin: 0 auto; padding: 56px 24px 96px; }
+  header { margin-bottom: 44px; }
+  .kicker { color: var(--accent); font-size: 13px; letter-spacing: .12em;
+            text-transform: uppercase; font-weight: 700; margin-bottom: 12px; }
+  h1 { font-size: 31px; line-height: 1.32; margin: 0 0 16px; letter-spacing: -.01em; }
+  .standfirst { color: var(--text-dim); font-size: 17px; margin: 0 0 24px; }
+  .meta { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13.5px;
+          color: var(--text-dim); border-top: 1px solid var(--border);
+          border-bottom: 1px solid var(--border); padding: 12px 0; }
+  .meta b { color: var(--text); font-weight: 700; }
+  h2 { font-size: 22px; margin: 50px 0 18px; line-height: 1.4;
+       display: flex; align-items: baseline; gap: 12px; }
+  h2::before {
+    content: attr(data-n); color: var(--accent); font-size: 13px; font-weight: 700;
+    letter-spacing: .1em; border: 1.5px solid var(--accent); border-radius: 4px;
+    padding: 2px 7px; flex: none; position: relative; top: -3px;
+  }
+  h3 { font-size: 17px; margin: 30px 0 12px; }
+  p { margin: 0 0 18px; }
+  ul, ol { margin: 0 0 18px; padding-left: 22px; }
+  li { margin-bottom: 8px; }
+  code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+         font-size: .88em; background: var(--surface-2); padding: 2px 5px;
+         border-radius: 4px; border: 1px solid var(--border); }
+  pre { background: var(--code-bg); color: var(--code-text); padding: 18px 20px;
+        border-radius: 8px; overflow-x: auto; font-size: 13.5px; line-height: 1.65; margin: 0 0 20px; }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
+  .cmt { color: #7b8894; }
+  .hl { color: #f0b86e; }
+  .callout { background: var(--accent-soft); border-left: 3px solid var(--accent);
+             padding: 16px 20px; border-radius: 0 6px 6px 0; margin: 0 0 22px; }
+  .callout.warn { background: var(--warn-soft); border-left-color: var(--warn); }
+  .callout.bug { background: var(--bad-soft); border-left-color: var(--bad); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .label { font-weight: 700; font-size: 12.5px; letter-spacing: .08em;
+                    display: block; margin-bottom: 8px; color: var(--accent); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.bug .label { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 22px; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface-2); font-weight: 700; }
+  td code { font-size: .85em; }
+  .table-scroll { overflow-x: auto; }
+  .trio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
+  @media (max-width: 700px) { .trio { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 8px; padding: 16px; font-size: 14.5px; }
+  .card h4 { margin: 0 0 8px; font-size: 15px; color: var(--accent); }
+  .card p { margin: 0; color: var(--text-dim); }
+  .card p + p { margin-top: 8px; }
+  .lede { font-size: 17px; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border);
+           color: var(--text-dim); font-size: 14px; }
+  strong { font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">传输协议 · 源码导读</div>
+  <h1>读 ikcp.c：在 UDP 上做可靠传输，要想清楚的五件事</h1>
+  <p class="standfirst">
+    KCP 用一千多行 C 代码实现了一套可靠传输。这篇不是逐行翻译，
+    而是挑出五个每个自研传输层都必须做的决策，看 KCP 是怎么选的、代价是什么，
+    以及要在它上面做扩展时该怎么下手。
+  </p>
+  <div class="meta">
+    <span>代码 <b>ikcp.c，约 1500 行</b></span>
+    <span>依赖 <b>无（只要一个发包回调）</b></span>
+    <span>适合 <b>做实时流、隧道、P2P 的人</b></span>
+  </div>
+</header>
+
+<p class="lede">
+  先回答"为什么不用 TCP"。TCP 的设计目标是<strong>在共享网络里公平且高效地搬运字节</strong>，
+  为此它愿意等——等重排、等拥塞窗口长大、等超时退避。
+  实时音视频的目标不一样：<strong>晚到的数据没有价值</strong>。
+  一帧画面迟到 3 秒，重传成功了也只是浪费带宽。
+  KCP 的所有取舍都可以从这句话推出来：它用更多的带宽换更低的延迟。
+</p>
+
+<h2 data-n="ONE">重传的三个触发条件</h2>
+
+<p>
+  可靠传输的核心就一件事：<strong>怎么知道该重发了</strong>。
+  KCP 的答案全在 <code>ikcp_flush()</code> 的这段判断里：
+</p>
+
+<pre><code>if (segment-&gt;xmit == 0) {
+    needsend = 1;                       <span class="cmt">// (1) 从没发过</span>
+} else if (_itimediff(current, segment-&gt;resendts) &gt;= 0) {
+    needsend = 1;  is_timeout = 1;      <span class="cmt">// (2) 超时了</span>
+} else if (segment-&gt;fastack &gt;= resent) {
+    if ((int)segment-&gt;xmit &lt;= kcp-&gt;fastlimit || kcp-&gt;fastlimit &lt;= 0) {
+        needsend = 1;  is_fastack = 1;  <span class="cmt">// (3) 被跳过太多次</span>
+    }
+}</code></pre>
+
+<div class="trio">
+  <div class="card">
+    <h4>首发</h4>
+    <p><code>xmit == 0</code></p>
+    <p>还没发过的新数据。注意首发也走这个统一循环，不是单独一条路径——少一套代码就少一处不一致。</p>
+  </div>
+  <div class="card">
+    <h4>超时重传</h4>
+    <p><code>current ≥ resendts</code></p>
+    <p>兜底手段，什么都没收到时唯一的依靠。代价是要等一个 RTO，是三者里最慢的。</p>
+  </div>
+  <div class="card">
+    <h4>快速重传</h4>
+    <p><code>fastack ≥ resent</code></p>
+    <p>后面的包被确认了，说明这个包大概率丢了。不用等超时，立刻补发。延迟敏感场景的主力。</p>
+  </div>
+</div>
+
+<p>
+  <code>fastack</code> 是怎么涨的？收到 ACK 时，KCP 会记下这批 ACK 里最大的序号，
+  然后给发送缓冲里所有比它小、且还没被确认的包各记一笔"你被跳过了"。
+  跳过次数达到 <code>fastresend</code>（典型配置是 2）就触发重传。
+</p>
+
+<p>
+  这里有个容易被忽略的保护：<code>segment->xmit <= kcp->fastlimit</code>。
+  <strong>已经重发过很多次的包，不再享受快速重传。</strong>
+  因为反复触发快重传通常意味着链路真的坏了，这时候继续激进补发只会加剧拥塞。
+  默认 <code>IKCP_FASTACK_LIMIT = 5</code>。
+</p>
+
+<h2 data-n="TWO">RTO 怎么算，以及 KCP 在哪儿偷了懒</h2>
+
+<p>超时重传要有个"超时时间"。这个值算大了反应慢，算小了误判丢包、白白重发。KCP 用的是经典公式：</p>
+
+<pre><code>kcp-&gt;rx_rttval = (3 * kcp-&gt;rx_rttval + delta) / 4;   <span class="cmt">// 抖动的滑动平均</span>
+kcp-&gt;rx_srtt   = (7 * kcp-&gt;rx_srtt + rtt) / 8;      <span class="cmt">// RTT 的滑动平均</span>
+
+rto = kcp-&gt;rx_srtt + _imax_(kcp-&gt;interval, 4 * kcp-&gt;rx_rttval);
+kcp-&gt;rx_rto = _ibound_(kcp-&gt;rx_minrto, rto, IKCP_RTO_MAX);</code></pre>
+
+<p>
+  <strong>RTO = 平均 RTT + 4 倍抖动</strong>，这和 TCP 是一致的。
+  值得注意的是两个夹逼：下界 <code>rx_minrto</code>，上界 60 秒。
+</p>
+
+<p>下界这个值，是 KCP "低延迟优先"最直接的体现：</p>
+
+<div class="table-scroll">
+<table>
+  <tr><th>模式</th><th>最小 RTO</th><th>超时后的退避</th><th>适用</th></tr>
+  <tr>
+    <td>普通 <code>nodelay=0</code></td>
+    <td>100 ms</td>
+    <td><code>rto += max(rto, rx_rto)</code>，约等于翻倍</td>
+    <td>带宽敏感、能忍延迟</td>
+  </tr>
+  <tr>
+    <td>极速 <code>nodelay=1</code></td>
+    <td><b>30 ms</b></td>
+    <td><code>rto += rto / 2</code>，只涨 1.5 倍</td>
+    <td>实时流、互动</td>
+  </tr>
+</table>
+</div>
+
+<p>
+  TCP 超时后是指数退避（每次翻倍），KCP 在极速模式下只涨 1.5 倍。
+  这意味着<strong>持续丢包时 KCP 会比 TCP 重发得频繁得多</strong>。
+  这不是 bug，是明码标价的取舍：用带宽换延迟。
+</p>
+
+<div class="callout warn">
+  <span class="label">选型时要认清的代价</span>
+  <p>
+    这个取舍在专网、隧道、一对一 P2P 里是划算的。但如果你的流量要和别人共享一条拥挤的链路，
+    KCP 的激进重传会挤占其他连接，也会让自己在丢包率高时陷入"越丢越发、越发越丢"。
+    <strong>把 KCP 当成"更快的 TCP"来用，是最常见的误用。</strong>
+  </p>
+</div>
+
+<h2 data-n="THREE">拥塞控制：原版够用吗</h2>
+
+<p>KCP 自带的拥塞控制是教科书式的 Reno：</p>
+
+<pre><code>if (kcp-&gt;cwnd &lt; kcp-&gt;ssthresh) {
+    kcp-&gt;cwnd++;                    <span class="cmt">// 慢启动：每个 RTT 翻倍</span>
+    kcp-&gt;incr += mss;
+} else {
+    <span class="cmt">// 拥塞避免：每个 RTT 才涨大约一个包</span>
+    if (kcp-&gt;incr &lt; mss) kcp-&gt;incr = mss;
+    kcp-&gt;incr += (mss * mss) / kcp-&gt;incr + (mss / 16);
+    ...
+}</code></pre>
+
+<p>
+  问题出在拥塞避免阶段：<strong>每个 RTT 只涨一个包</strong>。
+  假设 RTT 是 50ms，窗口要从 10 个包长到 100 个包，需要 90 个 RTT，也就是 4.5 秒。
+</p>
+
+<p>
+  对文件传输，4.5 秒无所谓。对直播开流，这 4.5 秒正好是观众<strong>点开画面的头几秒</strong>——
+  这段时间里编码器在按目标码率产出，而发送窗口还没长到能承载它，
+  数据堆在队列里，最后被丢掉。用户的感受是"刚点开总要卡一下"。
+</p>
+
+<p>所以生产环境里换成了 CUBIC，它的窗口增长是三次函数，几个 RTT 就能逼近上一次的拥塞点：</p>
+
+<pre><code>if (kcp-&gt;cong != NULL) {
+    <span class="cmt">/*
+     * CUBIC. Stock growth below raises cwnd by roughly one packet per
+     * RTT once past slow start, so reaching the capacity of a fast
+     * link takes many round trips - long enough that the opening
+     * seconds of a live stream queue up and get dropped. CUBIC gets
+     * there in a few RTTs instead.
+     */</span>
+    ikcp_cong_cubic_on_ack(kcp, (IUINT32)_itimediff(kcp-&gt;snd_una, prev_una));
+} else if (kcp-&gt;cwnd &lt; kcp-&gt;rmt_wnd) {
+    <span class="cmt">... 原版逻辑保持不动 ...</span>
+}</code></pre>
+
+<p>
+  顺带一提，KCP 还提供了 <code>nocwnd=1</code> 直接关掉拥塞控制。
+  这在完全可控的专线上能榨出性能，但在公网上等于把网络当成自己家的——
+  <strong>它是一个需要你对链路负全责的开关，不是一个性能选项。</strong>
+</p>
+
+<h2 data-n="FOUR">给别人的库做扩展，三条纪律</h2>
+
+<p>
+  把 CUBIC 挂进 KCP 这件事本身，比 CUBIC 的公式更值得学：
+  <strong>怎么在一个上游会持续更新的三方库里插入自己的逻辑</strong>。
+</p>
+
+<h3>纪律一：留钩子，不改逻辑</h3>
+
+<p>结构体里加一个不透明指针，原有字段一个不动：</p>
+
+<pre><code>struct IKCPCB {
+    ...
+    <span class="cmt">/* CUBIC congestion control state; NULL falls back to stock KCP growth */</span>
+    void *cong;
+};</code></pre>
+
+<h3>纪律二：扩展失败要能降级，不能失败</h3>
+
+<pre><code><span class="cmt">/*
+ * CUBIC is what the shipping TuyaOS mid_p2p registers here. If it cannot
+ * allocate, kcp-&gt;cong stays NULL and every call site below falls back to
+ * the stock KCP growth rather than failing the connection.
+ */</span>
+(void)ikcp_cong_cubic_init(kcp);</code></pre>
+
+<p>
+  注意这里连返回值都不检查——<strong>因为失败是被允许的</strong>。
+  分配不出内存时 <code>cong</code> 保持 NULL，所有调用点自动走原版路径，连接照常建立。
+  优化模块挂不上就退回基础实现，而不是让整个连接失败，这个原则在资源紧张的嵌入式上尤其重要。
+</p>
+
+<h3>纪律三：跟着宿主的资源管理走</h3>
+
+<p>
+  KCP 允许调用方替换内存分配器（<code>ikcp_allocator()</code>），
+  比如在 MCU 上把它指到 PSRAM。原来 <code>ikcp_malloc</code> 是 <code>static</code> 的，
+  扩展模块用不了，于是把它导出：
+</p>
+
+<pre><code><span class="cmt">/* Not static: the congestion control module allocates its per-connection state
+ * and must go through the same hook, or that state lands in a different memory
+ * pool than the rest of the transport. */</span>
+void *ikcp_malloc(size_t size);
+void  ikcp_free(void *ptr);</code></pre>
+
+<p>
+  如果扩展模块直接用 <code>malloc</code>，它的状态会落在 C 库堆上，
+  而传输层本体在 PSRAM 里。平时看不出问题，直到某天内存统计对不上、
+  或者某个平台的 C 库堆小到装不下几十个连接的拥塞状态。
+  <strong>扩展模块必须和宿主用同一套资源管理，这条在内存、线程、日志上都成立。</strong>
+</p>
+
+<h2 data-n="FIVE">一个真实的 bug：窗口被减了两次</h2>
+
+<p>接上面的改造，有个坑藏得很深，值得单独讲。</p>
+
+<p>原版 KCP 在 flush 的末尾这样处理拥塞窗口：</p>
+
+<pre><code>if (change) {           <span class="cmt">// 发生过快速重传</span>
+    kcp-&gt;ssthresh = inflight / 2;
+    kcp-&gt;cwnd = kcp-&gt;ssthresh + resent;
+}
+
+if (lost) {             <span class="cmt">// 发生过超时重传</span>
+    kcp-&gt;ssthresh = cwnd / 2;
+    kcp-&gt;cwnd = 1;      <span class="cmt">// 直接打回 1</span>
+}</code></pre>
+
+<p>
+  两个 <code>if</code> 是并列的，而 <code>change</code> 和 <code>lost</code>
+  <strong>完全可能在同一次 flush 里同时为真</strong>——
+  发送缓冲里有几十个包，一个触发了快重传，另一个刚好超时，这在丢包时太常见了。
+</p>
+
+<p>
+  原版这么写没出大问题，因为 <code>lost</code> 分支是无条件覆盖赋值（<code>cwnd = 1</code>），
+  写第二遍还是 1。但换成 CUBIC 之后，减窗变成了<strong>基于当前值的相对运算</strong>
+  （乘一个系数），连续调用两次就是连乘——一次网络事件把窗口砍了两刀。
+</p>
+
+<div class="callout bug">
+  <span class="label">现场表现</span>
+  <p>
+    丢包时吞吐塌得比预期深得多，而且恢复慢一倍。日志上看不出异常，
+    因为每一步都"按算法执行了"。这类 bug 的特征是：<strong>不崩溃、不报错，
+    只是性能不对</strong>，而性能不对很容易被归咎于网络本身。
+  </p>
+</div>
+
+<p>修法是把它改成互斥的，并且明确谁优先：</p>
+
+<pre><code><span class="cmt">/*
+ * CUBIC owns both ssthresh and cwnd on loss. Only one reduction may be
+ * applied per flush even when a fast retransmit and an RTO are both
+ * flagged, otherwise the window is halved twice for a single event and
+ * the flow takes far longer to recover than the algorithm intends.
+ * RTO is the more severe signal, so it wins.
+ */</span>
+if (lost) {
+    ikcp_cong_cubic_on_loss(kcp, 1);       <span class="cmt">// 超时：更严重，优先</span>
+} else if (change) {
+    ikcp_cong_cubic_on_loss(kcp, 0);       <span class="cmt">// 快重传：较轻</span>
+}</code></pre>
+
+<div class="callout">
+  <p>
+    可以带走的一般结论：<strong>把"幂等的覆盖赋值"换成"相对运算"时，
+    所有调用它的地方都要重新检查调用次数。</strong>
+    原来写两遍无所谓的代码，改完之后写两遍就是错的。
+    这类回归在重构里非常隐蔽，因为改动点和出问题的点看起来毫无关系。
+  </p>
+</div>
+
+<h2 data-n="EXTRA">附：四个参数怎么调</h2>
+
+<p>KCP 的调优基本就是 <code>ikcp_nodelay()</code> 这一个函数的四个参数：</p>
+
+<div class="table-scroll">
+<table>
+  <tr><th>参数</th><th>含义</th><th>实时流建议</th><th>影响</th></tr>
+  <tr>
+    <td><code>nodelay</code></td><td>极速模式</td><td>1</td>
+    <td>最小 RTO 100ms → 30ms，退避从 2 倍降到 1.5 倍</td>
+  </tr>
+  <tr>
+    <td><code>interval</code></td><td>内部时钟间隔</td><td>10 ms</td>
+    <td>决定 flush 频率，也是 RTO 的下限项之一。默认 100ms 对实时流太粗</td>
+  </tr>
+  <tr>
+    <td><code>resend</code></td><td>快重传阈值</td><td>2</td>
+    <td>被跳过几次就补发。设 0 关闭快重传，只剩超时兜底</td>
+  </tr>
+  <tr>
+    <td><code>nc</code></td><td>关闭拥塞控制</td><td>谨慎</td>
+    <td>只在链路完全可控时开，公网上开这个是把风险转嫁给别人</td>
+  </tr>
+</table>
+</div>
+
+<p>
+  <code>interval</code> 有个隐藏影响容易被漏掉：它参与 RTO 计算
+  （<code>rto = srtt + max(interval, 4*rttval)</code>）。
+  也就是说<strong>调大 interval 会连带把 RTO 抬高</strong>，
+  在低延迟链路上尤其明显——RTT 只有 10ms 的时候，interval=100 会让 RTO 被 interval 主导。
+</p>
+
+<h2 data-n="END">值得记住的三句话</h2>
+
+<ol>
+  <li>
+    <strong>KCP 不是"更快的 TCP"，是"用带宽换延迟的 TCP"。</strong>
+    选它之前先确认你的场景真的愿意付这个代价，以及链路是不是你独占的。
+  </li>
+  <li>
+    <strong>拥塞窗口的增长速度，决定了流的头几秒体验。</strong>
+    稳态吞吐是所有人都会测的指标，开流瞬间的表现却经常没人量——而用户恰恰在那一刻做判断。
+  </li>
+  <li>
+    <strong>给三方库做扩展，用钩子 + NULL 回退 + 共享分配器。</strong>
+    这三条让你的改动能在上游升级后活下来，也让扩展失败时系统能降级而不是倒下。
+  </li>
+</ol>
+
+<footer>
+  <p>
+    源码：<code>src/tuya_p2p/base_ice/src/ikcp.c</code>（协议本体）、
+    <code>ikcp.h</code>（控制块与参数接口）。
+    KCP 原始项目为 skywind3000/kcp，MIT 许可，本文引用的改造部分为在其之上的工程适配。
+  </p>
+</footer>
+
+</div>
+</body>
+</html>
