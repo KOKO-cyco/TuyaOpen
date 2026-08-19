@@ -23,6 +23,21 @@ menu "DshanPi A1 Board Configuration"
             Name of the audio codec device. This name is used to identify
             the audio device when calling tdl_audio_find().
 
+    config ENABLE_CAMERA
+        bool "Enable Camera"
+        default n
+
+    if (ENABLE_CAMERA)
+        config ENABLE_CAMERA_V4L2
+            bool "Enable V4L2 camera"
+            default y
+
+        config CAMERA_V4L2_DEVNODE
+            string "V4L2 device node"
+            depends on ENABLE_CAMERA_V4L2
+            default "/dev/video0"
+    endif
+
     config ENABLE_KEYBOARD_INPUT
         bool "Enable keyboard input for DshanPi A1"
         default y

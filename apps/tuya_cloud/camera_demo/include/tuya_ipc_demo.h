@@ -87,6 +87,19 @@ int demo_on_live_audio_stop_callback(void);
 int demo_on_recv_audio_frame_callback(MEDIA_FRAME *media_frame);
 
 /**
+ * @brief Ask the encoder for a key frame now
+ * @return 0 when the encoder accepted the request
+ */
+int demo_on_request_i_frame_callback(void);
+
+/**
+ * @brief Move the encoder's target bitrate
+ * @param[in] kbps requested bitrate
+ * @return 0 when the encoder accepted the change
+ */
+int demo_on_set_video_bitrate_callback(uint32_t kbps);
+
+/**
  * @brief Pause mic uplink (for PB send path — free P2P/UDP buffer)
  * @return none
  */

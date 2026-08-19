@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>三方库说自己"可移植"时，它到底在说什么</title>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --surface: #ffffff;
+    --surface-2: #f4f2ee;
+    --text: #23201c;
+    --text-dim: #6b645c;
+    --border: #e2ded7;
+    --accent: #b4531f;
+    --accent-soft: #fdf0e6;
+    --good: #2f6b45;
+    --good-soft: #eaf3ed;
+    --bad: #97331f;
+    --bad-soft: #fbecea;
+    --code-bg: #2b2723;
+    --code-text: #e9e3da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17151300;
+      --bg: #171513;
+      --surface: #1f1c19;
+      --surface-2: #262220;
+      --text: #ece7e0;
+      --text-dim: #a49c92;
+      --border: #332e2a;
+      --accent: #e0894f;
+      --accent-soft: #2a201a;
+      --good: #7fbf95;
+      --good-soft: #1c2620;
+      --bad: #e0897a;
+      --bad-soft: #2a1e1b;
+      --code-bg: #100e0d;
+      --code-text: #ddd6cc;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 56px 24px 96px; }
+  header { border-bottom: 2px solid var(--accent); padding-bottom: 28px; margin-bottom: 40px; }
+  .kicker {
+    color: var(--accent); font-size: 13px; letter-spacing: .12em;
+    text-transform: uppercase; font-weight: 700; margin-bottom: 12px;
+  }
+  h1 { font-size: 32px; line-height: 1.3; margin: 0 0 16px; letter-spacing: -.01em; }
+  .standfirst { color: var(--text-dim); font-size: 17px; margin: 0; }
+  h2 {
+    font-size: 22px; margin: 52px 0 18px; padding-top: 8px;
+    border-top: 1px solid var(--border); line-height: 1.4;
+  }
+  h2 .num {
+    display: inline-block; color: var(--accent); font-variant-numeric: tabular-nums;
+    margin-right: 10px; font-size: 18px;
+  }
+  h3 { font-size: 17px; margin: 32px 0 12px; }
+  p { margin: 0 0 18px; }
+  ul, ol { margin: 0 0 18px; padding-left: 22px; }
+  li { margin-bottom: 8px; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .88em; background: var(--surface-2); padding: 2px 5px;
+    border-radius: 4px; border: 1px solid var(--border);
+  }
+  pre {
+    background: var(--code-bg); color: var(--code-text); padding: 18px 20px;
+    border-radius: 8px; overflow-x: auto; font-size: 13.5px; line-height: 1.65;
+    margin: 0 0 20px;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
+  .cmt { color: #8d8377; }
+  .callout {
+    background: var(--accent-soft); border-left: 3px solid var(--accent);
+    padding: 16px 20px; border-radius: 0 6px 6px 0; margin: 0 0 22px;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 22px; }
+  @media (max-width: 640px) { .pair { grid-template-columns: 1fr; } }
+  .box { border-radius: 8px; padding: 14px 16px; font-size: 14.5px; border: 1px solid var(--border); }
+  .box.no { background: var(--bad-soft); border-color: var(--bad); }
+  .box.yes { background: var(--good-soft); border-color: var(--good); }
+  .box .tag { font-weight: 700; font-size: 12px; letter-spacing: .06em; display: block; margin-bottom: 6px; }
+  .box.no .tag { color: var(--bad); }
+  .box.yes .tag { color: var(--good); }
+  .box p { margin: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 22px; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface-2); font-weight: 700; }
+  .table-scroll { overflow-x: auto; }
+  .lede { font-size: 17px; }
+  .checklist { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 24px 20px; }
+  .checklist h3 { margin-top: 20px; }
+  .checklist li { list-style: none; position: relative; padding-left: 26px; }
+  .checklist ul { padding-left: 0; }
+  .checklist li::before {
+    content: ""; position: absolute; left: 0; top: 7px; width: 14px; height: 14px;
+    border: 1.5px solid var(--accent); border-radius: 3px;
+  }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border);
+           color: var(--text-dim); font-size: 14px; }
+  strong { font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">移植 · 抽象层 · 依赖治理</div>
+  <h1>三方库说自己"可移植"时，它到底在说什么</h1>
+  <p class="standfirst">
+    一次把 pjproject 的 socket 层落到自研 OS 抽象层的完整过程。讲的不是 pjsip，
+    是任何一个三方库在换平台时会卡在哪儿、耦合藏在哪几层、以及为什么"改调用点"是错的做法。
+  </p>
+</header>
+
+<p class="lede">
+  先说结论：<strong>库作者说的"可移植"，通常指的是"依赖被收在了一组可替换的后端文件里"，
+  而不是"没有平台依赖"。</strong> 判断一个库好不好移植，看的不是它宣称支持多少平台，
+  而是它的平台相关代码是<em>集中</em>的还是<em>弥散</em>的。
+</p>
+
+<h2><span class="num">01</span>症状：构建脚本开始长出芯片目录</h2>
+
+<p>
+  这件事的起点是一个构建脚本上的坏味道。SDK 里 P2P 模块的 CMakeLists 挂了 8 个芯片私有目录，
+  还定义了 3 个平台专属宏：
+</p>
+
+<pre><code>add_compile_definitions(
+    CONFIG_MSDU_RESV_HEAD_LENGTH=0
+    CONFIG_MSDU_RESV_DESC_LENGTH=0
+    CONFIG_MSDU_RESV_TAIL_LENGTH=0
+)
+include_directories(
+    ${PLATFORM_PATH}/t5_os/ap/components/lwip_intf_v2_1/lwip-2.1.2/src/include
+    ${PLATFORM_PATH}/t5_os/ap/components/bk_libs/bk7258_ap/config
+    ${PLATFORM_PATH}/t5_os/ap/middleware/driver/include/bk_private
+    <span class="cmt">... 一共 8 个 ...</span>
+)</code></pre>
+
+<p>
+  一个做 NAT 穿透的通用模块，为什么要知道某颗芯片的 lwIP 头文件在哪儿？
+  更实际的问题是：这个模块<strong>只能在这颗芯片上编译</strong>。换 Linux、换任何别的平台，
+  这 8 行全是死路。
+</p>
+
+<p>
+  更值得玩味的是这 8 个目录里为什么会有 <code>middleware/driver/include/bk_private</code>
+  这种明显和网络无关的路径。原来的注释解释了：lwIP 的 <code>arch/cc.h</code> 引了
+  <code>bk_uart.h</code>，于是厂商私有驱动目录也得跟着进搜索路径。
+  <strong>依赖是会传染的</strong>——你引了 A，A 引了 B，B 引了 C，
+  最后构建脚本里躺着一堆你从来没主动依赖过的东西。
+  这也是为什么"就加一个 include 路径"这种改动值得警惕。
+</p>
+
+<div class="callout">
+  <p>
+    构建脚本是依赖关系最诚实的地方。代码里的耦合可以靠命名和分层掩饰，
+    <strong>但只要 include 路径里出现了具体型号，耦合就是真的。</strong>
+    把这个当成体检指标：定期看一眼自己模块的 include 路径里有没有芯片名。
+  </p>
+</div>
+
+<h2><span class="num">02</span>耦合藏在三个深度，越往下越难拆</h2>
+
+<p>顺着这些 include 往回查，pjlib 对系统 socket 的依赖分三层，难度递增：</p>
+
+<div class="table-scroll">
+<table>
+  <tr><th>深度</th><th>形态</th><th>例子</th><th>拆解难度</th></tr>
+  <tr>
+    <td>浅</td><td>函数调用</td>
+    <td><code>sock_bsd.c</code> 直接调 <code>socket()</code> / <code>bind()</code></td>
+    <td>低。换实现即可</td>
+  </tr>
+  <tr>
+    <td>中</td><td>头文件包含</td>
+    <td><code>pj/compat/socket.h</code> 直接 <code>#include &lt;lwip/sockets.h&gt;</code></td>
+    <td>中。要连带处理它引入的所有宏</td>
+  </tr>
+  <tr>
+    <td>深</td><td>类型定义</td>
+    <td><code>pj_in_addr</code> 直接 <code>typedef</code> 到系统的 <code>struct in_addr</code></td>
+    <td>高。类型会渗透到所有调用方的签名里</td>
+  </tr>
+</table>
+</div>
+
+<p>
+  第三层是真正的麻烦。当库的公开类型直接等同于系统类型，
+  那么<strong>任何用到这个类型的代码都被间接绑定到了系统头文件上</strong>，
+  哪怕它一次系统调用都没做。这类耦合的传播范围远超预期，也是"看起来只要改几个文件"最后变成改几十个的原因。
+</p>
+
+<p>
+  好消息是，成熟的库通常给这一层留了开关。pjlib 就预留了自带的 <code>pj_in_addr</code> 定义，
+  用宏关着（<code>PJ_TUYAOS_OWN_IN_ADDR</code>）。找到这类预留开关，比自己动手改 typedef 划算得多。
+  <strong>动手改之前，先花二十分钟把库的移植文档和 compat 目录读一遍</strong>——
+  作者大概率已经想过这个问题了。
+</p>
+
+<h2><span class="num">03</span>换后端，不要改调用点</h2>
+
+<p>面对"这个库调了不该调的东西"，有两种改法：</p>
+
+<div class="pair">
+  <div class="box no">
+    <span class="tag">✕ 改调用点</span>
+    <p>
+      全局搜 <code>socket(</code>，一处处替换成自己的接口。<br><br>
+      结果：改动散落在几十个文件里，和上游代码彻底纠缠，
+      上游一升级就是一场灾难。而且总有漏网的。
+    </p>
+  </div>
+  <div class="box yes">
+    <span class="tag">✓ 换后端文件</span>
+    <p>
+      整个 <code>sock_bsd.c</code> 从构建里摘掉，放进一个实现相同签名的
+      <code>sock_tal.c</code>。<br><br>
+      结果：上层代码零改动，新旧实现可以并存对照，
+      上游升级时只需要看后端接口有没有变。
+    </p>
+  </div>
+</div>
+
+<p>CMake 里就是这么表达的：</p>
+
+<pre><code>list(REMOVE_ITEM PJLIB_SRCS
+     ${PJLIB_DIR}/src/pj/sock_bsd.c
+     ${PJLIB_DIR}/src/pj/sock_select.c
+     ${PJLIB_DIR}/src/pj/addr_resolv_sock.c
+     ${PJLIB_DIR}/src/pj/ip_helper_generic.c)
+<span class="cmt"># 换上四个同名职责的 TAL 后端</span></code></pre>
+
+<p>
+  四个文件对应四类职责：socket 原语、fd_set 与 select、域名解析、本机地址枚举。
+  <strong>能这样一一对应地换掉，本身就说明这个库的移植性设计是及格的</strong>——
+  它把平台相关代码按职责切成了独立文件，而不是散在业务逻辑里。
+</p>
+
+<p>
+  反过来，如果你评估一个库时发现它的系统调用散布在核心逻辑中间，
+  那就要认真考虑换库，或者接受"这个库只能跑在它原生支持的平台上"。
+</p>
+
+<h2><span class="num">04</span>透传变翻译之后，常量就自由了</h2>
+
+<p>这是整个过程里最反直觉、也最能说明抽象层价值的一点。</p>
+
+<p>
+  原来的 <code>sock_bsd.c</code> 里，<code>PJ_SO_RCVBUF</code> 这类常量<strong>必须</strong>等于系统的
+  <code>SO_RCVBUF</code>，因为它们被原样传给 <code>setsockopt()</code>。数值错了，行为就错了。
+</p>
+
+<p>换成翻译层之后，这个约束消失了：</p>
+
+<pre><code><span class="cmt">/*
+ * sock_bsd.c published the native values because it handed them straight to
+ * the OS. Here every option is translated in pj_sock_setsockopt(), so the
+ * values only have to be stable and unique within pjlib.
+ */</span>
+const pj_uint16_t PJ_SO_RCVBUF    = 2;
+const pj_uint16_t PJ_SO_SNDBUF    = 3;
+const pj_uint16_t PJ_SO_REUSEADDR = 4;</code></pre>
+
+<p>翻译在一处集中发生：</p>
+
+<pre><code>if (optname == PJ_SO_RCVBUF) {
+    rt = tal_net_set_bufsize((int)sock, val, TRANS_RECV);
+} else if (optname == PJ_SO_SNDBUF) {
+    rt = tal_net_set_bufsize((int)sock, val, TRANS_SEND);
+} else if (optname == PJ_SO_REUSEADDR) {
+    rt = val ? tal_net_set_reuse((int)sock) : OPRT_OK;
+}</code></pre>
+
+<div class="callout">
+  <p>
+    可以推广的判断：<strong>一个常量的取值必须是"某个特定值"，说明它正在被透传；
+    取值只要"唯一且稳定"，说明中间有翻译层。</strong>
+    前者意味着抽象是假的——它只是换了个名字，语义仍然锁死在原平台上。
+  </p>
+</div>
+
+<p>
+  抽象层的价值恰恰在这里：它不只是"包一层函数"，而是<strong>把语义从具体平台上摘下来</strong>。
+  摘下来之后，TAL 底下接 Linux 的 POSIX socket 还是 MCU 的 lwIP，
+  对 pjlib 来说是同一件事，同一条代码路径。
+</p>
+
+<h2><span class="num">05</span>字节序这种约定，必须写在文件头</h2>
+
+<p>
+  跨层最容易出错的不是函数语义，是<strong>数据表示的约定</strong>。
+  socket 这块最典型的就是字节序：pj 的 <code>pj_sockaddr</code> 内部存网络序，
+  TAL 的接口收发主机序。
+</p>
+
+<p>
+  一次转换写反了，症状是连接去了一个莫名其妙的 IP，或者端口变成了另一个数。
+  调试时看日志，IP 打出来还是对的（因为打印函数也做了转换），极其难查。
+</p>
+
+<p>处理办法很朴素但有效——把约定写在文件顶部，并且只留两个过桥函数：</p>
+
+<pre><code><span class="cmt"> * Address convention: pj_sockaddr keeps network byte order (sin_addr,
+ * sin_port), TAL takes and returns host byte order. Every crossing goes
+ * through pj_sockaddr_to_tal() / tal_to_pj_sockaddr().</span></code></pre>
+
+<p>
+  "每一次跨越都走这两个函数"这条纪律比转换本身重要。
+  只要有一个地方图省事直接赋值，这个 bug 就会在某个特定场景下冒出来。
+  <strong>约定靠收口执行，不靠记性。</strong>
+</p>
+
+<h2><span class="num">06</span>为什么 ICE 死活需要 getsockname</h2>
+
+<p>补充两个新接口的时候，很容易觉得 <code>getsockname</code> 是个可有可无的查询函数。它不是。</p>
+
+<p>
+  NAT 穿透的第一步是收集本机候选地址（host candidate）。程序 <code>bind</code> 到端口 0，
+  让内核分配一个空闲端口——<strong>然后它必须知道内核分了哪个端口</strong>，
+  才能把这个地址报给对端。唯一的途径就是 <code>getsockname</code>。
+</p>
+
+<p>这个函数缺失或者返回假数据，表现是 P2P 连不通，而且报错信息完全指不到这里。</p>
+
+<p>实现上还有个坑，绑到 <code>INADDR_ANY</code> 时它报回来的是 0.0.0.0：</p>
+
+<pre><code><span class="cmt">/*
+ * A socket bound to INADDR_ANY reports 0.0.0.0 (lwIP sometimes 127.0.0.1).
+ * ICE needs a routable base address for its host candidates, so fall back
+ * to the station/wired IPv4. The port stays as reported.
+ */</span>
+if (host == 0 || (host &gt;&gt; 24) == 127) {
+    unsigned int nbo;
+    if (tal_compat_get_sta_ipv4_nbo(&amp;nbo) == 0)
+        host = pj_ntohl((pj_uint32_t)nbo);
+}</code></pre>
+
+<p>
+  端口保持原样，只替换地址。这类"协议要求的语义"和"系统接口给的原始值"之间的差距，
+  是移植工作里最花时间的部分，也是最容易被"编译过了就算完"跳过的部分。
+</p>
+
+<h2><span class="num">07</span>空桩比缺失更危险</h2>
+
+<p>移植过程中撞到平台层的两个真实情况，都值得记：</p>
+
+<div class="pair">
+  <div class="box no">
+    <span class="tag">情况一：假实现</span>
+    <p>
+      <code>tkl_net_getsockname()</code> 存在，编译链接都过，
+      <strong>函数体是 <code>return 0</code></strong>。<br><br>
+      调用方拿到"成功"和一个全零地址，然后基于全零地址往下走。
+      故障点被推到很远的地方。
+    </p>
+  </div>
+  <div class="box no">
+    <span class="tag">情况二：拼错名字</span>
+    <p>
+      <code>tkl_net_set_broadcast()</code> 是空桩，
+      真正有实现的叫 <code>tkl_net_set_boardcast()</code>（board/broad 拼错）。<br><br>
+      按文档调用的人拿到空实现，把名字抄错的人反而能用。
+    </p>
+  </div>
+</div>
+
+<p>
+  第一种情况的教训可以直接变成团队规范：<strong>未实现的接口要返回
+  <code>NOT_SUPPORTED</code>，不能返回 OK。</strong>
+  空桩返回成功，等于向调用方撒谎，而调用方没有任何办法识破。
+</p>
+
+<p>
+  这和上一篇讲驱动分层时的结论是同一条：<em>"假装成功"比"明确失败"危害大得多</em>。
+  它在不同的层、不同的模块反复出现，说明这不是某个人的疏忽，是一种系统性的诱惑——
+  写桩的时候返回 OK 最省事，编译能过，测试能过，问题留给下一个人。
+</p>
+
+<h2><span class="num">08</span>编译通过什么都不能证明</h2>
+
+<p>
+  这次移植的结果是：两个平台都 BUILD SUCCESS，模块里再无 lwIP / 芯片头文件引用，
+  构建脚本里的 PLATFORM_PATH 引用降到 0。
+</p>
+
+<p>看起来很像可以收工了。但提交信息里这一段是必要的：</p>
+
+<pre><code><span class="cmt">未完成（务必上板验证后再合入）
+- 仅通过编译，ICE 对绑定端口、非阻塞语义、errno 映射敏感，
+  LIVE/PB 必须在 T5AI 板子上完整跑一遍
+- 依赖 platform 的配套改动：tkl_net_getsockname / tkl_net_getpeername
+  原本是 return 0 的空桩，需要在平台仓补上真实实现</span></code></pre>
+
+<p>
+  socket 这层尤其如此。<strong>编译器能检查的是签名，检查不了语义</strong>：
+  非阻塞模式下 <code>connect</code> 该返回什么、
+  errno 怎么映射到库的错误码、
+  <code>select</code> 超时精度够不够——这些全部只能在真实网络上暴露。
+</p>
+
+<div class="callout">
+  <p>
+    所以移植类工作的完成度，正确的表述方式是分级的：
+    <strong>「编译通过」→「跑起来了」→「关键路径验证过」→「长稳跑过」</strong>。
+    停在哪一级都可以，但要说清楚停在哪一级。
+    把「编译通过」说成「移植完成」，是给后面的人埋雷。
+  </p>
+</div>
+
+<h2><span class="num">09</span>下次移植可以照着走的清单</h2>
+
+<div class="checklist">
+  <h3>评估阶段</h3>
+  <ul>
+    <li>构建脚本的 include 路径里有没有出现具体芯片/平台名</li>
+    <li>库的平台相关代码是集中在几个后端文件里，还是散在核心逻辑中</li>
+    <li>库的公开类型有没有直接 typedef 到系统类型（最深的耦合）</li>
+    <li>compat / port 目录里，作者预留了哪些开关</li>
+  </ul>
+
+  <h3>动手阶段</h3>
+  <ul>
+    <li>换整个后端文件，不要逐处改调用点</li>
+    <li>常量改成库内自定义值，翻译集中在一个函数里</li>
+    <li>数据表示约定（字节序、指针所有权、单位）写在文件头，跨越只走固定函数</li>
+    <li>不支持的能力返回 NOT_SUPPORTED，不要返回 OK</li>
+  </ul>
+
+  <h3>收尾阶段</h3>
+  <ul>
+    <li>确认底层依赖不是空桩——挨个看实现，不要只看有没有这个符号</li>
+    <li>明确说明验证到了哪一级：编译 / 跑通 / 关键路径 / 长稳</li>
+    <li>未完成项写进提交信息，不要只留在自己脑子里</li>
+  </ul>
+</div>
+
+<footer>
+  <p>
+    案例代码：<code>src/tuya_p2p/pjproject/pjlib/src/pj/sock_tal.c</code>（新后端）、
+    <code>src/tal_network/</code>（抽象层与 POSIX/TKL 两个实现）、
+    <code>src/tuya_p2p/CMakeLists.txt</code>（依赖收敛前后对比）。
+  </p>
+</footer>
+
+</div>
+</body>
+</html>

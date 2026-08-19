@@ -26,13 +26,34 @@ static int ipc_lan_cmd_cb(const uint8_t *data, uint8_t **out);
 OPERATE_RET TUYA_APP_Start(TUYA_IPC_SDK_VAR_S *pSdkVar)
 {
     OPERATE_RET ret = OPRT_OK;
+    static BOOL_T started = FALSE;
+
+    /*
+     * Bringing the stack up is a one-off. Callers tend to hang this off "device
+     * is online", which fires again on every MQTT reconnect, and each re-entry
+     * would allocate another set of transport buffers in tuya_p2p_rtc_init and
+     * register the LAN signalling callback a second time. p2p_init refuses
+     * re-entry on its own, but only after that work has already been done, so
+     * the gate belongs here at the entry point too.
+     */
+    if (started) {
+        PR_WARN("IPC stack already started, ignoring");
+        return OPRT_OK;
+    }
 
     // Set activation skill parameters and report
     TUYA_IPC_SKILL_PARAM_U skill_param = {.value = 0};
     skill_param.value = tuya_p2p_rtc_get_skill();
     tuya_ipc_skill_enable(TUYA_IPC_SKILL_P2P, &skill_param);
     skill_param.value = 1;
-    tuya_ipc_skill_enable(TUYA_IPC_SKILL_LOWPOWER, &skill_param);
+    /*
+     * Not reported here on purpose. Announcing lowPower changes how the cloud
+     * and App treat the device - wake-up handling, when a stream may be
+     * requested - and this build runs the always-on path, with
+     * stream_var.low_power left clear below. Claiming one and behaving as the
+     * other is worse than claiming neither. A genuinely battery powered
+     * product should set both, together.
+     */
 #if defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1)
     tuya_ipc_skill_enable(TUYA_IPC_SKILL_LOCALSTG, &skill_param);
 #endif
@@ -55,8 +76,6 @@ OPERATE_RET TUYA_APP_Start(TUYA_IPC_SDK_VAR_S *pSdkVar)
         return ret;
     }
 
-    p2p_rtc_listen_start();
-
     TUYA_IPC_P2P_VAR_T var = {0};
     var.max_client_num = stream_var.max_client_num;
     var.def_live_mode = stream_var.def_live_mode;
@@ -70,6 +89,8 @@ OPERATE_RET TUYA_APP_Start(TUYA_IPC_SDK_VAR_S *pSdkVar)
     var.on_live_audio_start_callback = pSdkVar->OnLiveAudioStartCallback;
     var.on_live_audio_stop_callback = pSdkVar->OnLiveAudioStopCallback;
     var.on_recv_audio_frame_callback = pSdkVar->OnRecvAudioFrameCallback;
+    var.on_request_i_frame_callback = pSdkVar->OnRequestIFrameCallback;
+    var.on_set_video_bitrate_callback = pSdkVar->OnSetVideoBitrateCallback;
     if (var.recv_buffer_size == 0) {
         var.recv_buffer_size = 16 * 1024;
     }
@@ -78,6 +99,20 @@ OPERATE_RET TUYA_APP_Start(TUYA_IPC_SDK_VAR_S *pSdkVar)
         PR_ERR("tuya_ipc_p2p_init failed \n");
         return ret;
     }
+
+    /* Listen only after p2p_init() allocated the session context: the listen
+     * thread wakes on ICE negotiation success and dereferences it immediately.
+     * A peer that is already bound reconnects right after rtc_init, and the
+     * wake-up condition is latched, so starting the thread before p2p_init()
+     * is a reliable NULL dereference on restart, not a narrow race. */
+    p2p_rtc_listen_start();
+
+    /*
+     * Latched only once everything is up, so a failure that happens before
+     * p2p_init - which owns the session and refuses re-entry itself - can still
+     * be retried rather than leaving the device permanently without streaming.
+     */
+    started = TRUE;
     return ret;
 }
 
@@ -210,6 +245,21 @@ OPERATE_RET __p2p_v3_login_init(int preconnect, int max_client, int bitrate)
      */
     strOpt.video_bitrate_kbps = bitrate;
 
+    /*
+     * Tried doubling this for Linux (more RAM to spare than an MCU), reasoning
+     * that a wider buffer / KCP window (ikcp_wndsize derives the window from
+     * this buffer: send_buf_size / 1600) would absorb the startup congestion
+     * seen right after a peer connects. Real hardware disproved it: at both
+     * the original and the doubled size, the queue still filled to ~99% of
+     * capacity during that window (the actual sustained throughput of this
+     * link during ICE/KCP ramp-up is the bottleneck, not the buffer depth) -
+     * doubling only changed the failure mode from a brief, self-recovering
+     * frame skip into several extra seconds of stale, high-latency video.
+     * Buffering more does not fix a throughput deficit, it just relabels it
+     * as latency. Left at the MCU-aligned value; fixing this for real needs
+     * either less demand (lower bitrate) or bitrate that backs off when the
+     * send queue starts filling, not a bigger queue.
+     */
     uint32_t vsend = (bitrate * 1024u / 8u) * TUYA_P2P_SEND_BUFFER_SECONDS;
     if (vsend > TUYA_P2P_SEND_BUFFER_SIZE_MAX) {
         vsend = TUYA_P2P_SEND_BUFFER_SIZE_MAX;

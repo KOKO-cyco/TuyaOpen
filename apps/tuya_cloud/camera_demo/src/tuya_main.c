@@ -134,6 +134,19 @@ void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
     /* MQTT with tuya cloud is connected, device online */
     case TUYA_EVENT_MQTT_CONNECTED: {
         PR_INFO("Device MQTT Connected!");
+        /*
+         * Bring the IPC stack up once, not on every reconnect. MQTT drops and
+         * comes back routinely - roaming, weak signal, broker maintenance - and
+         * this used to re-run the whole bring-up each time: another p2p_init
+         * with its cmd_recv and media_send threads, another 300 kB frame
+         * buffer, another copy of this thread. Nothing was released, and a
+         * thread whose function returns does not end either (tal_thread parks
+         * it until tal_thread_delete), so the cost was ~180 kB of stack per
+         * reconnect, permanently. Reconnection is the transport's business.
+         */
+        if (NULL != hIpcDemoHandle) {
+            break;
+        }
         THREAD_CFG_T thrd_param = {4096 * 5, 4, "tuya_ipc_demo_thread"};
         tal_thread_create_and_start(&hIpcDemoHandle, NULL, NULL, tuya_ipc_demo_thread, NULL, &thrd_param);
         break;
@@ -386,6 +399,10 @@ static void tuya_ipc_demo_thread(void *arg)
     sdkVar.OnLiveAudioStartCallback = demo_on_live_audio_start_callback;
     sdkVar.OnLiveAudioStopCallback = demo_on_live_audio_stop_callback;
     sdkVar.OnRecvAudioFrameCallback = demo_on_recv_audio_frame_callback;
+    /* Let the streaming stack steer the encoder: a key frame when a viewer
+     * needs one, and a lower bitrate when the link cannot carry the stream. */
+    sdkVar.OnRequestIFrameCallback = demo_on_request_i_frame_callback;
+    sdkVar.OnSetVideoBitrateCallback = demo_on_set_video_bitrate_callback;
     TUYA_APP_Start(&sdkVar);
     tuya_ipc_demo_start();
     return;

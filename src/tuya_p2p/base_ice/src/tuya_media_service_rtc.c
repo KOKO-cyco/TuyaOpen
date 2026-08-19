@@ -1605,12 +1605,13 @@ static int on_kcp_output(const char *buf, int len, ikcpcb *kcp, void *user_data)
     // tuya_p2p_log_trace("channel_id: %08x, sn: %d, cmd: %d\n", channel_id, sn, cmd);
 
     if (cmd != KCP_CMD_PUSH || channel_id != RTC_CHANNEL_CMD) {
-        if (!pj_ice_session_sendto(rtc->pIce, (void *)buf, len + md_size)) {
-#if IKCP_PACING_RATE_LIMIT
-            /* UDP ENOBUFS / send fail: back off pacing so flush stops blasting */
-            pacing_on_send_fail(kcp, 50);
-#endif
-        }
+        /*
+         * A failed send is not backed off here any more. Pacing now bounds what
+         * a flush may emit up front, so the ENOBUFS this used to react to should
+         * not arise; if it still does, the budget is wrong and hiding that
+         * behind a retry delay would only make it harder to see.
+         */
+        (void)pj_ice_session_sendto(rtc->pIce, (void *)buf, len + md_size);
     }
 
     chan->socket_send_bytes += (len + md_size);
@@ -1916,9 +1917,34 @@ int tuya_p2p_rtc_channels_init(tuya_p2p_rtc_session_t *rtc)
         ikcp_setoutput(chan->kcp, on_kcp_output);
         ikcp_wndsize(chan->kcp, send_buf_size / 1600  /*TUYA_MBUF_HUGE_SIZE*/,
                      recv_buf_size / 1600 /*TUYA_MBUF_HUGE_SIZE*/);
-        /* Align TuyaOS mid_p2p: ikcp_nodelay(kcp, 0, 5, 20, nc);
-         * nc = !preconnect_enable (OS: clz of preconnect field). */
-        ikcp_nodelay(chan->kcp, 0, 5, 20, g_options.preconnect_enable ? 0 : 1);
+        /*
+         * ikcp_nodelay(kcp, nodelay, interval, resend, nocwnd).
+         *
+         * nocwnd: set it and congestion control is gone entirely, window growth
+         * included. TuyaOS derives it from the preconnect flag, which in turn
+         * comes from whether the product is battery powered; those have nothing
+         * to do with each other, and a low-power camera sits on the weakest
+         * links of any, so it is the last one that should be sending without a
+         * window. Keep it enabled unconditionally.
+         *
+         * resend is the duplicate-ACK count that triggers fast retransmit, and
+         * TuyaOS ships 20. A segment only accumulates a fastack per later
+         * segment acknowledged, so the count cannot exceed the number in
+         * flight, which is cwnd - measured at 1..18 for almost this whole
+         * session. At 20 the threshold is therefore unreachable in practice and
+         * fast retransmit never runs: every loss, and every spurious timeout,
+         * falls through to RTO instead, and RTO restarts cwnd from 1 where a
+         * fast retransmit would only have taken it to 0.7x. Measured cost was
+         * 277 RTO events in 267 seconds - one per second, each one flattening
+         * the window - which is what held a LAN peer to ~275 kbps. 2 is the
+         * value KCP documents for this ("2 ACK spans and retransmit"), and 0,
+         * not 20, is how KCP spells "off".
+         *
+         * interval is written as the 10 ms it will actually be: ikcp_nodelay
+         * clamps anything below 10 upwards, so the 5 that used to be here never
+         * took effect and only misled.
+         */
+        ikcp_nodelay(chan->kcp, 0, 10, 2, 0);
         ikcp_setmtu(chan->kcp, 1400);
         ikcp_setprocesspkt(chan->kcp, ctx_session_channel_process_pkt);
         // ikcp_setwritelog(chan->kcp, ctx_session_kcp_writelog);
@@ -1973,8 +1999,13 @@ void *rtc_worker_thread(void *arg)
     uint64_t last_dump_ms = 0;
     int timeout_logged = 0;
     int nego_done_logged = 0;
+    /* DBG throughput: see the 2s block below */
+    uint32_t dbg_loops = 0;
+    int64_t dbg_last_write = 0;
+    int64_t dbg_last_wire = 0;
 
     while (!rtc->bQuitKCPThread) {
+        dbg_loops++;
         if (rtc->pIce != NULL) {
             pj_ice_session_handle_events(rtc->pIce, 5, NULL); // Drive ICE state update and execute KCP receive operation
         }
@@ -1993,6 +2024,27 @@ void *rtc_worker_thread(void *arg)
             uint64_t now = tuya_p2p_misc_get_timestamp_ms();
             if ((now - last_dump_ms) >= 2000ULL) {
                 uint64_t elapsed = now - start_ms;
+                /*
+                 * DBG throughput: which of the send-side limits is actually
+                 * binding. loops is how often this thread got round to flushing
+                 * (KCP can only put segments on the wire from here), kcp_in vs
+                 * wire separates offered load from what the socket took plus
+                 * retransmissions, and cwnd/snd/rmt says which window closed.
+                 */
+                tal_mutex_lock(rtc->channel_lock);
+                if (rtc->channels != NULL && rtc->channels[1].kcp != NULL) {
+                    rtc_channel_t *vch = &rtc->channels[1]; /* TUYA_VDATA_CHANNEL */
+                    ikcpcb *k = vch->kcp;
+                    PR_NOTICE("DBG p2p tx 2s: loops=%u kcp_in=%lld wire=%lld cwnd=%u snd=%u rmt=%u "
+                              "rto=%d srtt=%d xmit=%u que=%u buf=%u",
+                              dbg_loops, (long long)(vch->write_bytes - dbg_last_write),
+                              (long long)(vch->socket_send_bytes - dbg_last_wire), k->cwnd, k->snd_wnd, k->rmt_wnd,
+                              k->rx_rto, k->rx_srtt, k->xmit, k->nsnd_que, k->nsnd_buf);
+                    dbg_last_write = vch->write_bytes;
+                    dbg_last_wire = vch->socket_send_bytes;
+                }
+                tal_mutex_unlock(rtc->channel_lock);
+                dbg_loops = 0;
                 last_dump_ms = now;
                 if (rtc->pIce != NULL && !pj_ice_session_is_nego_done(rtc->pIce)) {
                     pj_ice_session_dbg_dump(rtc->pIce, "worker_pending");
@@ -2411,7 +2463,11 @@ static int __rtc_channel_recreate_kcp(rtc_channel_t *chan, uint32_t conv)
     }
     ikcp_setoutput(chan->kcp, on_kcp_output);
     ikcp_wndsize(chan->kcp, send_wnd, recv_wnd);
-    ikcp_nodelay(chan->kcp, 0, 5, 20, g_options.preconnect_enable ? 0 : 1);
+    /* Same settings as the initial create above - see the reasoning there. A
+     * channel rebuilt mid-session must not end up on a different congestion
+     * profile than the one it replaces; nocwnd in particular used to be derived
+     * from preconnect here while the create path had already stopped doing so. */
+    ikcp_nodelay(chan->kcp, 0, 10, 2, 0);
     ikcp_setmtu(chan->kcp, 1400);
     ikcp_setprocesspkt(chan->kcp, ctx_session_channel_process_pkt);
     return 0;

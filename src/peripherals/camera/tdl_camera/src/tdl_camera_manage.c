@@ -369,10 +369,16 @@ OPERATE_RET tdl_camera_dev_open(TDL_CAMERA_HANDLE_T camera_hdl,  TDL_CAMERA_CFG_
     if(camera_dev->intfs.open) {
         TDD_CAMERA_OPEN_CFG_T open_cfg;
 
-        open_cfg.fps     = camera_dev->info.fps;
-        open_cfg.width   = camera_dev->info.width;
-        open_cfg.height  = camera_dev->info.height;
-        open_cfg.out_fmt = camera_dev->info.out_fmt;
+        /* Cleared first so a field added later cannot reach a driver as stack
+         * garbage just because this mapping was not updated with it. */
+        memset(&open_cfg, 0, sizeof(open_cfg));
+
+        open_cfg.fps          = camera_dev->info.fps;
+        open_cfg.width        = camera_dev->info.width;
+        open_cfg.height       = camera_dev->info.height;
+        open_cfg.out_fmt      = camera_dev->info.out_fmt;
+        open_cfg.bitrate_kbps = cfg->bitrate_kbps;
+        open_cfg.gop          = cfg->gop;
 
         memcpy(&open_cfg.encoded_quality, &cfg->encoded_quality, sizeof(TUYA_DVP_ENCODED_QUALITY));
 
@@ -392,6 +398,32 @@ OPERATE_RET tdl_camera_dev_open(TDL_CAMERA_HANDLE_T camera_hdl,  TDL_CAMERA_CFG_
 OPERATE_RET tdl_camera_dev_close(TDL_CAMERA_HANDLE_T camera_hdl)
 {
     return OPRT_NOT_SUPPORTED;
+}
+
+OPERATE_RET tdl_camera_dev_request_i_frame(TDL_CAMERA_HANDLE_T camera_hdl)
+{
+    CAMERA_DEVICE_T *camera_dev = (CAMERA_DEVICE_T *)camera_hdl;
+
+    if (NULL == camera_dev) {
+        return OPRT_INVALID_PARM;
+    }
+    if (NULL == camera_dev->intfs.request_i_frame) {
+        return OPRT_NOT_SUPPORTED;
+    }
+    return camera_dev->intfs.request_i_frame(camera_dev->tdd_hdl);
+}
+
+OPERATE_RET tdl_camera_dev_set_bitrate(TDL_CAMERA_HANDLE_T camera_hdl, uint32_t kbps)
+{
+    CAMERA_DEVICE_T *camera_dev = (CAMERA_DEVICE_T *)camera_hdl;
+
+    if (NULL == camera_dev || 0 == kbps) {
+        return OPRT_INVALID_PARM;
+    }
+    if (NULL == camera_dev->intfs.set_bitrate) {
+        return OPRT_NOT_SUPPORTED;
+    }
+    return camera_dev->intfs.set_bitrate(camera_dev->tdd_hdl, kbps);
 }
 
 /**

@@ -10,6 +10,7 @@
 //
 //=====================================================================
 #include "ikcp.h"
+#include "ikcp_cong.h"
 #include "ikcp_pacing.h"
 #include "tuya_mbuf.h"
 
@@ -161,16 +162,17 @@ static void (*ikcp_free_hook)(void *) = NULL;
 #define IKCP_DEFAULT_FREE(p) free(p)
 #endif
 
-// internal malloc
-static void *ikcp_malloc(size_t size)
+/* Not static: the congestion control module allocates its per-connection state
+ * and must go through the same hook, or that state lands in a different memory
+ * pool than the rest of the transport. */
+void *ikcp_malloc(size_t size)
 {
     if (ikcp_malloc_hook)
         return ikcp_malloc_hook(size);
     return IKCP_DEFAULT_MALLOC(size);
 }
 
-// internal free
-static void ikcp_free(void *ptr)
+void ikcp_free(void *ptr)
 {
     if (ikcp_free_hook) {
         ikcp_free_hook(ptr);
@@ -322,12 +324,18 @@ ikcpcb *ikcp_create(IUINT32 conv, void *user)
     kcp->writelog = NULL;
     kcp->process_pkt = NULL;
     kcp->pacing = NULL;
-    kcp->next_send = 0;
+    kcp->cong = NULL;
     if (pacing_init(kcp) != 0) {
         ikcp_free(kcp->buffer);
         ikcp_free(kcp);
         return NULL;
     }
+    /*
+     * CUBIC is what the shipping TuyaOS mid_p2p registers here. If it cannot
+     * allocate, kcp->cong stays NULL and every call site below falls back to
+     * the stock KCP growth rather than failing the connection.
+     */
+    (void)ikcp_cong_cubic_init(kcp);
 
     return kcp;
 }
@@ -375,6 +383,7 @@ void ikcp_release(ikcpcb *kcp)
         kcp->buffer = NULL;
         kcp->acklist = NULL;
         pacing_fini(kcp);
+        ikcp_cong_cubic_release(kcp);
         ikcp_free(kcp);
     }
 }
@@ -682,6 +691,8 @@ static void ikcp_update_ack(ikcpcb *kcp, IINT32 rtt)
     }
     rto = kcp->rx_srtt + _imax_(kcp->interval, 4 * kcp->rx_rttval);
     kcp->rx_rto = _ibound_(kcp->rx_minrto, rto, IKCP_RTO_MAX);
+    /* CUBIC needs the minimum RTT to decide when Reno would have been faster. */
+    ikcp_cong_cubic_on_rtt(kcp, rtt);
 }
 
 static void ikcp_shrink_buf(ikcpcb *kcp)
@@ -1009,10 +1020,16 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
     }
 
     if (_itimediff(kcp->snd_una, prev_una) > 0) {
-#if IKCP_PACING_RATE_LIMIT
-        pacing_update(kcp);
-#endif
-        if (kcp->cwnd < kcp->rmt_wnd) {
+        if (kcp->cong != NULL) {
+            /*
+             * CUBIC. Stock growth below raises cwnd by roughly one packet per
+             * RTT once past slow start, so reaching the capacity of a fast
+             * link takes many round trips - long enough that the opening
+             * seconds of a live stream queue up and get dropped. CUBIC gets
+             * there in a few RTTs instead.
+             */
+            ikcp_cong_cubic_on_ack(kcp, (IUINT32)_itimediff(kcp->snd_una, prev_una));
+        } else if (kcp->cwnd < kcp->rmt_wnd) {
             IUINT32 mss = kcp->mss;
             if (kcp->cwnd < kcp->ssthresh) {
                 kcp->cwnd++;
@@ -1187,6 +1204,12 @@ void ikcp_flush(ikcpcb *kcp)
     resent = (kcp->fastresend > 0) ? (IUINT32)kcp->fastresend : 0xffffffff;
     rtomin = (kcp->nodelay == 0) ? (kcp->rx_rto >> 3) : 0;
 
+#if IKCP_PACING_RATE_LIMIT
+    /* One flush period's share of the cwnd/srtt rate, so a full window reaches
+     * the wire over an RTT rather than in a single burst the queue cannot hold. */
+    pacing_flush_begin(kcp);
+#endif
+
     // flush data segments
     for (p = kcp->snd_buf.next; p != &kcp->snd_buf; p = p->next) {
         IKCPSEG *segment = iqueue_entry(p, IKCPSEG, node);
@@ -1194,9 +1217,6 @@ void ikcp_flush(ikcpcb *kcp)
         int is_timeout = 0;
         int is_fastack = 0;
         int need;
-#if IKCP_PACING_RATE_LIMIT
-        int paced_size;
-#endif
 
         if (segment->xmit == 0) {
             needsend = 1;
@@ -1217,9 +1237,10 @@ void ikcp_flush(ikcpcb *kcp)
         size = (int)(ptr - buffer);
         need = IKCP_OVERHEAD + segment->len;
 #if IKCP_PACING_RATE_LIMIT
-        paced_size = (size > 0) ? (size + need) : need;
-        /* OS mid_p2p pacing: stop dumping data into UDP when rate budget empty */
-        if (!pacing_try_send(kcp, (IUINT32)paced_size)) {
+        /* Charge this segment only. The old call passed the accumulated output
+         * buffer plus the segment, which counted the earlier segments again
+         * every time round and drained the budget far faster than the wire. */
+        if (!pacing_try_send(kcp, (IUINT32)need)) {
             break;
         }
 #endif
@@ -1274,21 +1295,36 @@ void ikcp_flush(ikcpcb *kcp)
     }
 
     // update ssthresh
-    if (change) {
-        IUINT32 inflight = kcp->snd_nxt - kcp->snd_una;
-        kcp->ssthresh = inflight / 2;
-        if (kcp->ssthresh < IKCP_THRESH_MIN)
-            kcp->ssthresh = IKCP_THRESH_MIN;
-        kcp->cwnd = kcp->ssthresh + resent;
-        kcp->incr = kcp->cwnd * kcp->mss;
-    }
+    if (kcp->cong != NULL) {
+        /*
+         * CUBIC owns both ssthresh and cwnd on loss. Only one reduction may be
+         * applied per flush even when a fast retransmit and an RTO are both
+         * flagged, otherwise the window is halved twice for a single event and
+         * the flow takes far longer to recover than the algorithm intends.
+         * RTO is the more severe signal, so it wins.
+         */
+        if (lost) {
+            ikcp_cong_cubic_on_loss(kcp, 1);
+        } else if (change) {
+            ikcp_cong_cubic_on_loss(kcp, 0);
+        }
+    } else {
+        if (change) {
+            IUINT32 inflight = kcp->snd_nxt - kcp->snd_una;
+            kcp->ssthresh = inflight / 2;
+            if (kcp->ssthresh < IKCP_THRESH_MIN)
+                kcp->ssthresh = IKCP_THRESH_MIN;
+            kcp->cwnd = kcp->ssthresh + resent;
+            kcp->incr = kcp->cwnd * kcp->mss;
+        }
 
-    if (lost) {
-        kcp->ssthresh = cwnd / 2;
-        if (kcp->ssthresh < IKCP_THRESH_MIN)
-            kcp->ssthresh = IKCP_THRESH_MIN;
-        kcp->cwnd = 1;
-        kcp->incr = kcp->mss;
+        if (lost) {
+            kcp->ssthresh = cwnd / 2;
+            if (kcp->ssthresh < IKCP_THRESH_MIN)
+                kcp->ssthresh = IKCP_THRESH_MIN;
+            kcp->cwnd = 1;
+            kcp->incr = kcp->mss;
+        }
     }
 
     if (kcp->cwnd < 1) {
