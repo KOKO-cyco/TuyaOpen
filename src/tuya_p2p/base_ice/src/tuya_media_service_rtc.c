@@ -2030,16 +2030,23 @@ void *rtc_worker_thread(void *arg)
                  * (KCP can only put segments on the wire from here), kcp_in vs
                  * wire separates offered load from what the socket took plus
                  * retransmissions, and cwnd/snd/rmt says which window closed.
+                 *
+                 * bw is the measured bottleneck rate pacing works from, and the
+                 * gap between srtt and minrtt is the standing queue ahead of us.
+                 * That gap is what separates a slow link from a bloated one:
+                 * they look identical in srtt alone, and the fix for each is the
+                 * opposite of the fix for the other.
                  */
                 tal_mutex_lock(rtc->channel_lock);
                 if (rtc->channels != NULL && rtc->channels[1].kcp != NULL) {
                     rtc_channel_t *vch = &rtc->channels[1]; /* TUYA_VDATA_CHANNEL */
                     ikcpcb *k = vch->kcp;
                     PR_NOTICE("DBG p2p tx 2s: loops=%u kcp_in=%lld wire=%lld cwnd=%u snd=%u rmt=%u "
-                              "rto=%d srtt=%d xmit=%u que=%u buf=%u",
+                              "rto=%d srtt=%d minrtt=%u bw=%u xmit=%u que=%u buf=%u",
                               dbg_loops, (long long)(vch->write_bytes - dbg_last_write),
                               (long long)(vch->socket_send_bytes - dbg_last_wire), k->cwnd, k->snd_wnd, k->rmt_wnd,
-                              k->rx_rto, k->rx_srtt, k->xmit, k->nsnd_que, k->nsnd_buf);
+                              k->rx_rto, k->rx_srtt, pacing_min_rtt(k), pacing_bw(k), k->xmit, k->nsnd_que,
+                              k->nsnd_buf);
                     dbg_last_write = vch->write_bytes;
                     dbg_last_wire = vch->socket_send_bytes;
                 }
@@ -2415,6 +2422,40 @@ int32_t tuya_p2p_rtc_check_buffer(int32_t handle, uint32_t channel_id, uint32_t 
             *send_free_size = (chan->send_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_free_size(chan->send_queue) : 0;
         }
     } else {
+        ret = TUYA_P2P_ERROR_INVALID_SESSION_HANDLE;
+    }
+    tal_mutex_unlock(rtc->channel_lock);
+    tal_mutex_unlock(g_p2p_session_mutex);
+    return ret;
+}
+
+int32_t tuya_p2p_rtc_get_link_rate(int32_t handle, uint32_t channel_id, uint32_t *bw_bps, uint32_t *min_rtt_ms)
+{
+    int ret = 0;
+    (void)handle;
+
+    tal_mutex_lock(g_p2p_session_mutex);
+    if (g_pRtcSession == NULL) {
+        tal_mutex_unlock(g_p2p_session_mutex);
+        return TUYA_P2P_ERROR_INVALID_SESSION_HANDLE;
+    }
+    tuya_p2p_rtc_session_t *rtc = g_pRtcSession;
+    tal_mutex_lock(rtc->channel_lock);
+    if (rtc->channels != NULL && rtc->channels[channel_id].kcp != NULL) {
+        ikcpcb *k = rtc->channels[channel_id].kcp;
+        if (bw_bps != NULL) {
+            *bw_bps = pacing_bw(k);
+        }
+        if (min_rtt_ms != NULL) {
+            *min_rtt_ms = pacing_min_rtt(k);
+        }
+    } else {
+        if (bw_bps != NULL) {
+            *bw_bps = 0;
+        }
+        if (min_rtt_ms != NULL) {
+            *min_rtt_ms = 0;
+        }
         ret = TUYA_P2P_ERROR_INVALID_SESSION_HANDLE;
     }
     tal_mutex_unlock(rtc->channel_lock);

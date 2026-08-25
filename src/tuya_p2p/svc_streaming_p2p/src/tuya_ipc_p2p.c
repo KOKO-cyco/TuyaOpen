@@ -175,6 +175,7 @@ typedef struct {
     uint32_t rc_warmup;        // windows skipped while the link settles
     RC_STATE_E rc_state;       // increase / hold / decrease, see the draft
     uint64_t rc_window_ms;     // when the current window opened
+    uint32_t rc_bw_kbps;       // smoothed link capacity the transport measured
     uint32_t rc_base_kbps;     // configured rate, the ceiling to return to
     uint32_t rc_cur_kbps;      // rate currently commanded
     uint64_t iframe_req_ms;    // last key frame request, to rate limit them
@@ -884,6 +885,30 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
 #define RC_FILL_EVENTS_MIN 3u   /* shed frames in a window before believing congestion */
 
 /*
+ * Share of the measured link the encoder is allowed to ask for.
+ *
+ * The transport now reports what the peer actually acknowledged, so the rate
+ * can be set from the link's capacity rather than inferred from a queue that
+ * only says "full" once it is too late. The remainder covers what the encoder
+ * does not know about: KCP headers, the audio channel, retransmissions, and the
+ * fact that a measurement is always a little behind a link that moves.
+ */
+#define RC_BW_SHARE_NUM   85u
+#define RC_BW_SHARE_DEN   100u
+
+/*
+ * Smoothing on the measurement, in windows.
+ *
+ * The raw estimate is a windowed maximum over a few round trips and on a poor
+ * link it swings hard - 37 to 192 kB/s inside ten seconds was measured on the
+ * board's Wi-Fi. Re-keying the encoder at that cadence would cost more than the
+ * tracking is worth, so it is averaged over roughly four seconds. Congestion
+ * still gets an immediate response: that path does not go through the average.
+ */
+#define RC_BW_SMOOTH_OLD  3u
+#define RC_BW_SMOOTH_DEN  4u
+
+/*
  * Smallest change worth reprogramming the encoder for.
  *
  * Changing the bitrate is not free: the encoder is reconfigured and emits a
@@ -938,6 +963,20 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
         floor_kbps = 1;
     }
 
+    /*
+     * What the transport measured the link to be worth. Zero until enough has
+     * been acknowledged to say anything, and zero if pacing is compiled out.
+     */
+    {
+        uint32_t bw_bps = 0;
+        if (tuya_p2p_rtc_get_link_rate(pSession->session, TUYA_VDATA_CHANNEL, &bw_bps, NULL) == 0 && bw_bps > 0) {
+            uint32_t bw_kbps = (uint32_t)(((uint64_t)bw_bps * 8u) / 1000u);
+            pSession->rc_bw_kbps = (pSession->rc_bw_kbps == 0)
+                                       ? bw_kbps
+                                       : ((pSession->rc_bw_kbps * RC_BW_SMOOTH_OLD) + bw_kbps) / RC_BW_SMOOTH_DEN;
+        }
+    }
+
     if (pSession->rc_warmup < RC_WARMUP_WINDOWS) {
         pSession->rc_warmup++;
     } else {
@@ -950,39 +989,68 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
         BOOL_T overuse = (fills >= RC_FILL_EVENTS_MIN || avg_fill >= RC_FILL_HIGH_PCT) ? TRUE : FALSE;
         BOOL_T drained = (avg_fill <= RC_FILL_LOW_PCT) ? TRUE : FALSE;
 
-        switch (pSession->rc_state) {
-        case RC_STATE_DECREASE:
-            /* Keep cutting while it is still congested; once the queue is back
-             * under control, hold rather than immediately climbing again. */
+        if (pSession->rc_bw_kbps > 0) {
+            /*
+             * Set the rate from the link, not from the queue.
+             *
+             * The queue only distinguishes "full" from "empty", and it is full
+             * for as long as the transport is still opening its window - which
+             * on a slow path takes twenty seconds. Driven by that alone the
+             * controller walked 1024 kbps down to its floor while the transport
+             * was still ramping, then sat there: measured 289 kbps carried on a
+             * link the transport had by then measured at 1540.
+             *
+             * Occupancy still has a job, but a narrower one. It cannot say how
+             * fast the link is; it can say the estimate is currently wrong, so
+             * it is kept as the one signal that may override the measurement
+             * downwards.
+             */
+            want = pSession->rc_bw_kbps * RC_BW_SHARE_NUM / RC_BW_SHARE_DEN;
             if (overuse) {
-                want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                uint32_t backoff = pSession->rc_cur_kbps * RC_DOWN_NUM / RC_DOWN_DEN;
+                if (want > backoff) {
+                    want = backoff;
+                }
+                pSession->rc_state = RC_STATE_DECREASE;
             } else {
-                pSession->rc_state = RC_STATE_HOLD;
+                pSession->rc_state = drained ? RC_STATE_INCREASE : RC_STATE_HOLD;
             }
-            break;
+        } else {
+            /* Nothing measured yet - the queue heuristic is all there is. */
+            switch (pSession->rc_state) {
+            case RC_STATE_DECREASE:
+                /* Keep cutting while it is still congested; once the queue is
+                 * back under control, hold rather than immediately climbing. */
+                if (overuse) {
+                    want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                } else {
+                    pSession->rc_state = RC_STATE_HOLD;
+                }
+                break;
 
-        case RC_STATE_HOLD:
-            /* Rate stays put until the backlog has genuinely gone. */
-            if (overuse) {
-                want = want * RC_DOWN_NUM / RC_DOWN_DEN;
-                pSession->rc_state = RC_STATE_DECREASE;
-            } else if (drained) {
-                pSession->rc_state = RC_STATE_INCREASE;
-            }
-            break;
+            case RC_STATE_HOLD:
+                /* Rate stays put until the backlog has genuinely gone. */
+                if (overuse) {
+                    want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                    pSession->rc_state = RC_STATE_DECREASE;
+                } else if (drained) {
+                    pSession->rc_state = RC_STATE_INCREASE;
+                }
+                break;
 
-        case RC_STATE_INCREASE:
-        default:
-            if (overuse) {
-                want = want * RC_DOWN_NUM / RC_DOWN_DEN;
-                pSession->rc_state = RC_STATE_DECREASE;
-            } else if (drained && want < pSession->rc_base_kbps) {
-                want = want * RC_UP_NUM / RC_UP_DEN;
-            } else if (!drained) {
-                /* Neither congested nor empty: leave it alone. */
-                pSession->rc_state = RC_STATE_HOLD;
+            case RC_STATE_INCREASE:
+            default:
+                if (overuse) {
+                    want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                    pSession->rc_state = RC_STATE_DECREASE;
+                } else if (drained && want < pSession->rc_base_kbps) {
+                    want = want * RC_UP_NUM / RC_UP_DEN;
+                } else if (!drained) {
+                    /* Neither congested nor empty: leave it alone. */
+                    pSession->rc_state = RC_STATE_HOLD;
+                }
+                break;
             }
-            break;
         }
 
         if (want < floor_kbps) {
@@ -1002,12 +1070,12 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
         if (delta * 100u >= pSession->rc_cur_kbps * RC_MIN_CHANGE_PCT || want == floor_kbps ||
             want == pSession->rc_base_kbps) {
             /* No literal percent sign: the log formatter renders "%%" as '?'. */
-            PR_NOTICE("rate control: %u -> %u kbps [%s] (queue avg %u pct, peak %u pct, %u full events)",
+            PR_NOTICE("rate control: %u -> %u kbps [%s] (link %u kbps, queue avg %u pct, peak %u pct, %u full events)",
                       pSession->rc_cur_kbps, want,
                       (pSession->rc_state == RC_STATE_DECREASE)
                           ? "decrease"
                           : ((pSession->rc_state == RC_STATE_HOLD) ? "hold" : "increase"),
-                      avg_fill, pSession->rc_fill_peak, fills);
+                      pSession->rc_bw_kbps, avg_fill, pSession->rc_fill_peak, fills);
             if (pSession->on_set_video_bitrate_callback(want) == 0) {
                 pSession->rc_cur_kbps = want;
             }
@@ -1508,10 +1576,14 @@ static int __p2p_session_trans_video_start(P2P_SESSION_T *pSession)
     pSession->dbg_vget_fail = 0;
     pSession->video_frame_pending = FALSE;
 
-    /* Rate control starts from whatever the stream is configured to produce and
-     * only ever moves down from there, so pick the ceiling up here. */
+    /* Rate control starts from whatever the stream is configured to produce,
+     * which is also its ceiling, so pick that up here. */
     pSession->rc_base_kbps = pSession->av_Info.bitrate[p2p_get_chn_idx(pSession->cur_clarity)];
     pSession->rc_cur_kbps = pSession->rc_base_kbps;
+    /* A new session gets a new transport and a new estimate; carrying the old
+     * link's capacity across would set the opening rate from a path that is no
+     * longer in use. */
+    pSession->rc_bw_kbps = 0;
     pSession->rc_window_ms = 0;
     pSession->rc_fill_peak = 0;
     pSession->rc_fill_sum = 0;

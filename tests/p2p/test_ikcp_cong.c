@@ -193,16 +193,23 @@ int main(void)
         snprintf(buf, sizeof(buf), "%ld B in one flush, window is %ld B", first_flush, window_bytes);
         check("one flush sends a slice, not all", first_flush > 0 && first_flush < window_bytes / 4, buf);
 
-        /* Over a full RTT the budget should add up to about the window, so
-         * pacing delays the burst without throttling the flow. */
+        /* Nothing here is ever acknowledged, and a sender that has not heard
+         * from its peer must not commit a large backlog to a path it knows
+         * nothing about - so the flow stops at the opening in-flight allowance
+         * however big cwnd claims to be. An earlier version of this test
+         * asserted the opposite, that a 100 segment window drained in full over
+         * one RTT; that was the cwnd/srtt pacer, which had no notion of what was
+         * outstanding. What a window does over an RTT on a link that answers is
+         * covered properly in test_ikcp_pacing, against a simulated bottleneck.
+         */
         for (i = 1; i < slices; i++) {
             kcp->current += interval;
             ikcp_flush(kcp);
         }
         whole_rtt = g_wire_bytes;
-        snprintf(buf, sizeof(buf), "%ld B over %u ms vs %ld B window", whole_rtt, srtt, window_bytes);
-        check("a whole window goes out per RTT",
-              whole_rtt >= (window_bytes * 3) / 4 && whole_rtt <= window_bytes * 2, buf);
+        snprintf(buf, sizeof(buf), "%ld B unacknowledged, window claims %ld B", whole_rtt, window_bytes);
+        check("an unacked flow stops at the initial window",
+              whole_rtt > 0 && whole_rtt <= window_bytes / 4, buf);
 
         ikcp_release(kcp);
     }

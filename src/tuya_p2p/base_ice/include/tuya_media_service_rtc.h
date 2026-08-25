@@ -435,6 +435,20 @@ void tuya_p2p_rtc_notify_exit();
 int32_t tuya_p2p_rtc_check_buffer(int32_t handle, uint32_t channel_id, uint32_t *write_size, uint32_t *read_size,
                                   uint32_t *send_free_size);
 /**
+ * @brief What the transport has measured the link to be capable of
+ * @param[in] handle session handle (unused; uses the current session)
+ * @param[in] channel_id media channel id (e.g. TUYA_VDATA_CHANNEL)
+ * @param[out] bw_bps bottleneck bandwidth in bytes per second, 0 if not yet measured
+ * @param[out] min_rtt_ms smallest round trip seen recently, 0 if not yet measured
+ * @return 0 on success, negative if there is no transport to ask
+ * @note This is the delivery rate pacing works from - what the peer actually
+ *       acknowledged, not what was handed to the socket. The encoder rate
+ *       control uses it directly; queue occupancy only says a queue is full,
+ *       never how much the link can carry.
+ */
+int32_t tuya_p2p_rtc_get_link_rate(int32_t handle, uint32_t channel_id, uint32_t *bw_bps, uint32_t *min_rtt_ms);
+
+/**
  * @brief Drop pending KCP send segments on a channel and recreate KCP (free mbuf budget)
  * @param[in] handle session handle (unused; uses current g_pRtcSession)
  * @param[in] channel_id media channel id (e.g. TUYA_VDATA_CHANNEL)

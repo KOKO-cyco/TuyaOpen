@@ -718,6 +718,10 @@ static void ikcp_parse_ack(ikcpcb *kcp, IUINT32 sn)
         next = p->next;
         if (sn == seg->sn) {
             iqueue_del(p);
+#if IKCP_PACING_RATE_LIMIT
+            /* Delivered: this is what the pacing rate is measured from. */
+            pacing_on_acked(kcp, (IUINT32)(IKCP_OVERHEAD + seg->len));
+#endif
             ikcp_segment_delete(kcp, seg);
             kcp->nsnd_buf--;
             break;
@@ -736,6 +740,9 @@ static void ikcp_parse_una(ikcpcb *kcp, IUINT32 una)
         next = p->next;
         if (_itimediff(una, seg->sn) > 0) {
             iqueue_del(p);
+#if IKCP_PACING_RATE_LIMIT
+            pacing_on_acked(kcp, (IUINT32)(IKCP_OVERHEAD + seg->len));
+#endif
             ikcp_segment_delete(kcp, seg);
             kcp->nsnd_buf--;
         } else {
@@ -946,6 +953,10 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
         if (cmd == IKCP_CMD_ACK) {
             if (_itimediff(kcp->current, ts) >= 0) {
                 ikcp_update_ack(kcp, _itimediff(kcp->current, ts));
+#if IKCP_PACING_RATE_LIMIT
+                /* Raw sample, not the smoothed value: pacing needs the minimum. */
+                pacing_on_rtt(kcp, (IUINT32)_itimediff(kcp->current, ts));
+#endif
             }
             ikcp_parse_ack(kcp, sn);
             ikcp_shrink_buf(kcp);
@@ -1240,7 +1251,7 @@ void ikcp_flush(ikcpcb *kcp)
         /* Charge this segment only. The old call passed the accumulated output
          * buffer plus the segment, which counted the earlier segments again
          * every time round and drained the budget far faster than the wire. */
-        if (!pacing_try_send(kcp, (IUINT32)need)) {
+        if (!pacing_try_send(kcp, (IUINT32)need, segment->xmit == 0)) {
             break;
         }
 #endif

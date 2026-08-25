@@ -39,7 +39,7 @@
 #define TUYA_OPENSDK_UUID       "uuidxxxxxxxxxxxxxxxx"                    // Please change the correct uuid
 #endif
 #ifndef TUYA_OPENSDK_AUTHKEY
-#define TUYA_OPENSDK_AUTHKEY    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        // Please change the correct authkey
+#define TUYA_OPENSDK_AUTHKEY    "keyxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        // Please change the correct authkey
 #endif
 /**
  * @brief PINCODE for AP provisioning
