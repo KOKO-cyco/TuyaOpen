@@ -161,6 +161,7 @@ typedef struct {
     uint32_t   tx_fill_pct;                             // occupancy of the video send queue, 0-100
     uint32_t   tx_full_cnt;                             // times a frame did not fit, this session
     uint32_t   tx_max_frame;                            // largest frame offered, sizes the queue floor
+    uint32_t   tx_drop_cnt;                             // key frames that shed a stale backlog
     uint32_t   rc_fill_peak;                            // worst occupancy seen in the current window
     uint32_t   rc_fill_sum;                             // occupancy accumulated over the window
     uint32_t   rc_fill_samples;                         // samples behind rc_fill_sum
@@ -2542,6 +2543,25 @@ static void __p2p_media_send_proc(void *pArg)
                         (void)__p2p_request_i_frame(pSession);
                     }
                     continue;
+                }
+
+                /*
+                 * Nothing queued behind a key frame survives it: the receiver
+                 * resynchronises on the key frame and decodes none of it. KCP
+                 * would still retransmit every lost segment of it, which on a
+                 * link this poor is most of the budget spent on frames that can
+                 * never be shown. Only what the peer has not been told about is
+                 * dropped, so the sequence stays intact.
+                 */
+                if (pSession->key_frame && pSession->tx_fill_pct >= P2P_TX_DRAINED_PCT) {
+                    uint32_t dropped = 0;
+                    if (tuya_p2p_rtc_drop_unsent(pSession->session, TUYA_VDATA_CHANNEL, &dropped) == 0 && dropped > 0) {
+                        if ((pSession->tx_drop_cnt % 20) == 0) {
+                            PR_DEBUG("key frame shed %u bytes of stale backlog (queue %u pct)", dropped,
+                                     pSession->tx_fill_pct);
+                        }
+                        pSession->tx_drop_cnt++;
+                    }
                 }
 
                 buf_ret = __p2p_check_free_buffer_size(index, TUYA_VDATA_CHANNEL, (int)pMediaFrame->size);

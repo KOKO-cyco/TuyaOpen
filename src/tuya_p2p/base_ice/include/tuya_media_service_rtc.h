@@ -435,6 +435,17 @@ void tuya_p2p_rtc_notify_exit();
 int32_t tuya_p2p_rtc_check_buffer(int32_t handle, uint32_t channel_id, uint32_t *write_size, uint32_t *read_size,
                                   uint32_t *send_free_size);
 /**
+ * @brief Discard queued data the peer has not been told about yet
+ * @param[in] handle session handle (unused; uses the current session)
+ * @param[in] channel_id channel number
+ * @param[out] p_dropped bytes discarded, may be NULL
+ * @return 0 on success, negative if there is no transport to ask
+ * @note For the moment a key frame is about to be queued: everything behind it
+ *       decodes into nothing once the receiver resynchronises, so retransmitting
+ *       it spends a scarce link on frames that will never be shown.
+ */
+int32_t tuya_p2p_rtc_drop_unsent(int32_t handle, uint32_t channel_id, uint32_t *p_dropped);
+/**
  * @brief What the transport has measured the link to be capable of
  * @param[in] handle session handle (unused; uses the current session)
  * @param[in] channel_id media channel id (e.g. TUYA_VDATA_CHANNEL)

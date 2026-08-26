@@ -15,14 +15,14 @@ mkdir -p "$out"
 cc=${CC:-gcc}
 transport="$src/src/ikcp.c $src/src/ikcp_cong.c $src/src/ikcp_pacing.c $src/src/ikcp_minmax.c"
 
-for t in test_ikcp_cong test_ikcp_pacing; do
+for t in test_ikcp_cong test_ikcp_pacing test_ikcp_drop; do
     # shellcheck disable=SC2086
     $cc -O1 -g -Wall -I"$src/src" -I"$src/include" \
         -o "$out/$t" "$here/$t.c" "$here/stubs.c" $transport
 done
 
 fail=0
-for t in test_ikcp_cong test_ikcp_pacing; do
+for t in test_ikcp_cong test_ikcp_pacing test_ikcp_drop; do
     echo "--- $t"
     "$out/$t" || fail=1
 done
