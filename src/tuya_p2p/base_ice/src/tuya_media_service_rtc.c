@@ -2397,14 +2397,12 @@ int32_t tuya_p2p_rtc_check_buffer(int32_t handle, uint32_t channel_id, uint32_t 
         rtc_channel_t *chan = &rtc->channels[channel_id];
         /* Align TuyaOS mid_p2p: sizes from mbuf_queue */
         if (write_size != NULL) {
-            uint32_t backlog =
-                (chan->send_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_used_size(chan->send_queue) : 0;
-            /* KCP queues downstream of the mbuf queue; measured 2-3.7 s of video
-             * sitting there unseen by the caller's latency budget. */
-            if (chan->kcp != NULL) {
-                backlog += (chan->kcp->nsnd_que + chan->kcp->nsnd_buf) * chan->kcp->mss;
-            }
-            *write_size = backlog;
+            /* Every queued packet is one mbuf held by one KCP segment, so the
+             * pool's used size and the segment count are two views of the same
+             * backlog - adding them counted it twice, and the pool's view is
+             * inflated anyway because it charges a whole TUYA_MBUF_HUGE_SIZE
+             * for a packet of any length. Ask KCP for the payload bytes. */
+            *write_size = (chan->kcp != NULL) ? (uint32_t)ikcp_waitsnd_bytes(chan->kcp) : 0;
         }
         if (read_size != NULL) {
             *read_size = (chan->recv_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_used_size(chan->recv_queue) : 0;
@@ -2499,6 +2497,38 @@ static int __rtc_channel_recreate_kcp(rtc_channel_t *chan, uint32_t conv)
     ikcp_nodelay(chan->kcp, 0, 10, 2, 0);
     ikcp_setmtu(chan->kcp, 1400);
     ikcp_setprocesspkt(chan->kcp, ctx_session_channel_process_pkt);
+    return 0;
+}
+
+/* Unlike clear_send_buffer this keeps the KCP object, so it is safe mid-stream:
+ * rebuilding one resets snd_nxt to 0 while the peer's rcv_nxt stays where it
+ * was, and every later segment is then discarded as a duplicate. */
+int32_t tuya_p2p_rtc_drop_unsent(int32_t handle, uint32_t channel_id, uint32_t *p_dropped)
+{
+    int32_t dropped = 0;
+    (void)handle;
+
+    if (p_dropped != NULL) {
+        *p_dropped = 0;
+    }
+    tal_mutex_lock(g_p2p_session_mutex);
+    if (g_pRtcSession == NULL || g_pRtcSession->channels == NULL) {
+        tal_mutex_unlock(g_p2p_session_mutex);
+        return TUYA_P2P_ERROR_INVALID_SESSION_HANDLE;
+    }
+    if (channel_id > g_pRtcSession->cfg.channel_number) {
+        tal_mutex_unlock(g_p2p_session_mutex);
+        return TUYA_P2P_ERROR_INVALID_PARAMETER;
+    }
+
+    tal_mutex_lock(g_pRtcSession->channel_lock);
+    dropped = ikcp_drop_unsent(g_pRtcSession->channels[channel_id].kcp);
+    tal_mutex_unlock(g_pRtcSession->channel_lock);
+    tal_mutex_unlock(g_p2p_session_mutex);
+
+    if (p_dropped != NULL && dropped > 0) {
+        *p_dropped = (uint32_t)dropped;
+    }
     return 0;
 }
 

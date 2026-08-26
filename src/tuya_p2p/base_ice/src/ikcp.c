@@ -1478,6 +1478,63 @@ int ikcp_waitsnd(const ikcpcb *kcp)
     return kcp->nsnd_buf + kcp->nsnd_que;
 }
 
+/* Segment count says nothing about delay when segments are short, and the mbuf
+ * pool cannot answer either: it charges a fixed TUYA_MBUF_HUGE_SIZE per buffer
+ * whatever the packet holds. Payload bytes are what a playout budget is spent
+ * in, so count those. */
+int ikcp_waitsnd_bytes(const ikcpcb *kcp)
+{
+    struct IQUEUEHEAD *p;
+    int                bytes = 0;
+
+    if (kcp == NULL) {
+        return 0;
+    }
+    for (p = kcp->snd_buf.next; p != &kcp->snd_buf; p = p->next) {
+        bytes += (int)iqueue_entry(p, IKCPSEG, node)->len;
+    }
+    for (p = kcp->snd_queue.next; p != &kcp->snd_queue; p = p->next) {
+        bytes += (int)iqueue_entry(p, IKCPSEG, node)->len;
+    }
+    return bytes;
+}
+
+/* Segments are given a sequence number in ikcp_flush, so whatever is still in
+ * snd_queue is unknown to the peer and can be discarded without leaving a hole.
+ * Fragments are the one constraint: ikcp_peeksize withholds a message until it
+ * sees frg == 0, so orphaning the tail of one stalls the receiver for good.
+ * Only snd_buf can hold a message that far, so its last segment decides whether
+ * the head of snd_queue has to be kept. */
+int ikcp_drop_unsent(ikcpcb *kcp)
+{
+    struct IQUEUEHEAD *p;
+    IKCPSEG           *seg;
+    int                dropped = 0;
+    int                keep    = 0;
+
+    if (kcp == NULL) {
+        return 0;
+    }
+    if (!iqueue_is_empty(&kcp->snd_buf)) {
+        seg  = iqueue_entry(kcp->snd_buf.prev, IKCPSEG, node);
+        keep = (seg->frg != 0);
+    }
+
+    for (p = kcp->snd_queue.next; p != &kcp->snd_queue;) {
+        seg = iqueue_entry(p, IKCPSEG, node);
+        p   = p->next;
+        if (keep) {
+            keep = (seg->frg != 0);
+            continue;
+        }
+        dropped += (int)seg->len;
+        iqueue_del(&seg->node);
+        ikcp_segment_delete(kcp, seg);
+        kcp->nsnd_que--;
+    }
+    return dropped;
+}
+
 // read conv
 IUINT32 ikcp_getconv(const void *ptr)
 {
