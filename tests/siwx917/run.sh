@@ -41,4 +41,12 @@ run_one test_tkl_pinmux -I"$adapter/include/pinmux" -I"$adapter/include/gpio" \
 "${PYTHON:-python3}" "$here/test_extract_rte_pinmux.py"
 echo
 
+"${PYTHON:-python3}" "$here/test_kconfig2slcp.py" | grep -vE '^(--->|CONFIG_|=====|Updated)'
+echo
+
+"${PYTHON:-python3}" "$here/test_check_board_facts.py"
+echo
+"${PYTHON:-python3}" "$here/check_board_facts.py"
+echo
+
 echo "all SiWx917 host tests passed"
