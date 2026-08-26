@@ -428,7 +428,7 @@ void tuya_p2p_rtc_notify_exit();
 // Check the current send/receive buffer status of a connection:
 // handle: connection handle
 // channel_id: channel number
-// write_size: after function returns, updated to current bytes written to send buffer but not sent successfully
+// write_size: after function returns, total bytes queued for send - the mbuf queue plus KCP's own backlog
 // read_size: after function returns, updated to current bytes received successfully but not read by application layer
 // send_free_size: after function returns, updated to remaining space in send buffer
 // return value: undefined

@@ -768,15 +768,7 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
     }
 
     if (channel == TUYA_VDATA_CHANNEL) {
-        /*
-         * writeSize is the backlog itself - "bytes written to the send buffer
-         * but not sent successfully", per tuya_p2p_rtc_check_buffer - and
-         * sendFreeSize is what is left of the queue. This used to subtract one
-         * from the other, which is meaningless: below half full the difference
-         * is negative and clamped to zero, above half full it climbs at twice
-         * the real rate. The controller therefore saw only 0 or 100 percent and
-         * nothing in between, and spent its time flipping between the two.
-         */
+        /* writeSize is the whole backlog: mbuf queue plus KCP's. */
         int used = writeSize;
         uint32_t kbps = sg_p2p_session->rc_cur_kbps ? sg_p2p_session->rc_cur_kbps : 1024u;
         /* kbps * ms / 8 == bytes of playout time */
@@ -786,25 +778,12 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
         if ((uint32_t)len > sg_p2p_session->tx_max_frame) {
             sg_p2p_session->tx_max_frame = (uint32_t)len;
         }
-        /*
-         * A budget smaller than the frames being put in it is a trap. Derived
-         * purely from the bitrate, it shrinks every time the rate drops - at
-         * 256 kbps it is 22 kB, while a key frame here measures 15-24 kB. One
-         * key frame then exceeds the whole budget on its own, which reads as
-         * congestion, which lowers the rate, which shrinks the budget again.
-         * Observed doing exactly that on a LAN, where there was no congestion
-         * to find. Always leave room for a few of the largest frames seen.
-         */
+        /* A budget below one key frame reads as permanent congestion. */
         keyframe_room = (int)(sg_p2p_session->tx_max_frame * P2P_TX_KEYFRAME_ROOM);
         if (budget < keyframe_room) {
             budget = keyframe_room;
         }
 
-        /* Capacity is backlog plus free space; the budget is a slice of that
-         * expressed as time, and can never exceed the queue it lives in. */
-        if (budget > writeSize + sendFreeSize) {
-            budget = writeSize + sendFreeSize;
-        }
         if (budget < 1) {
             budget = 1;
         }
@@ -813,13 +792,8 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
             sg_p2p_session->tx_fill_pct = 100;
         }
 
-        /*
-         * Judged on the backlog already queued, not on whether this frame also
-         * fits. A key frame can be several times the budget on a slow link, and
-         * refusing it whenever it does not fit means the stream can never
-         * recover; letting it through when the queue is otherwise drained costs
-         * one frame of extra delay and gets the picture back.
-         */
+        /* Judged on the existing backlog, not on whether this frame also fits:
+         * a key frame can exceed the budget alone and must still get through. */
         if (used > budget) {
             if ((sg_p2p_session->tx_full_cnt % 100) == 0) {
                 PR_WARN("video queue %d bytes over the %ums budget (%d), shedding frames", used,
@@ -1562,9 +1536,16 @@ OPERATE_RET tuya_p2p_rtc_register_get_audio_frame_cb(tuya_p2p_rtc_get_frame_cb_t
  ***********************************************************/
 static int __p2p_session_trans_video_start(P2P_SESSION_T *pSession)
 {
-    if (NULL == pSession || (P2P_VIDEO & pSession->cmd)) {
-        PR_ERR("param error or video started");
+    if (NULL == pSession) {
+        PR_ERR("video start: no session");
         return OPRT_INVALID_PARM;
+    }
+    if (P2P_VIDEO & pSession->cmd) {
+        /* The App repeats START when its decoder has no key frame to lock onto.
+         * Rejecting it is why tapping retry never helps: send one instead. */
+        (void)__p2p_request_i_frame(pSession);
+        PR_DEBUG("session[%d] video start repeated, key frame requested", pSession->session);
+        return OPRT_OK;
     }
     // Wait for previous data transmission to end
     PR_DEBUG("session[%d]video video_start wait_concurr_idle", pSession->session);

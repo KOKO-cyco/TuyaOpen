@@ -2413,7 +2413,13 @@ int32_t tuya_p2p_rtc_check_buffer(int32_t handle, uint32_t channel_id, uint32_t 
         rtc_channel_t *chan = &rtc->channels[channel_id];
         /* Align TuyaOS mid_p2p: sizes from mbuf_queue */
         if (write_size != NULL) {
-            *write_size = (chan->send_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_used_size(chan->send_queue) : 0;
+            uint32_t backlog = (chan->send_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_used_size(chan->send_queue) : 0;
+            /* KCP queues downstream of the mbuf queue; measured 2-3.7 s of video
+             * sitting there unseen by the caller's latency budget. */
+            if (chan->kcp != NULL) {
+                backlog += (chan->kcp->nsnd_que + chan->kcp->nsnd_buf) * chan->kcp->mss;
+            }
+            *write_size = backlog;
         }
         if (read_size != NULL) {
             *read_size = (chan->recv_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_used_size(chan->recv_queue) : 0;
