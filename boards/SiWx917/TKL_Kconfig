@@ -125,3 +125,15 @@ config LITTLE_END
     ---help---
         0       /* big endian */
         1       /* little endian */
+
+config SIWX917_FREERTOS_HEAP_SIZE
+    int "FreeRTOS heap in SRAM (bytes)"
+    default 131072
+
+config SIWX917_FREERTOS_HEAP_SIZE_PSRAM
+    int "FreeRTOS heap in PSRAM (bytes), 0 to omit"
+    default 0
+
+config SIWX917_TFLITE_ARENA_SIZE
+    int "TFLite Micro tensor arena (bytes), 0 to omit"
+    default 0
