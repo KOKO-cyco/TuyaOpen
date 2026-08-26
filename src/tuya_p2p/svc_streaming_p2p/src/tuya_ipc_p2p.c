@@ -90,7 +90,7 @@ typedef struct {
     int fix_len;                              // Supplementary private header data
     /* Packets of the current frame already handed to the transport. Once this
      * is non-zero the frame is partly on the wire and cannot be retried. */
-    int sent_pkts;
+    int  sent_pkts;
     char ext_head_buff[P2P_EXT_HEAD_MAX_LEN]; // According to extended video header protocol head+ext(8)+rtp_len
 } RTP_PACK_NAL_ARG_T;
 
@@ -111,15 +111,8 @@ typedef struct {
     int flag;     // READ_HEADER_PART/READ_PAYLOAD_PART
 } P2P_DATA_PARSE_T;
 
-/*
- * Rate control states, again from the draft.
- *
- * Hold is the one that was missing. After a decrease there is still a queue
- * built up, and going straight back to increasing means climbing on top of a
- * backlog that has not drained - the rate saws between the floor and a ceiling
- * the link cannot hold. Hold keeps the rate still until the queue is actually
- * empty, and only then hands over to increase.
- */
+/* Rate control states per draft-ietf-rmcat-gcc-02. Hold prevents climbing
+ * straight back into a queue that has not finished draining. */
 typedef enum {
     RC_STATE_INCREASE = 0,
     RC_STATE_HOLD,
@@ -160,25 +153,25 @@ typedef struct {
     uint32_t dbg_vsend_ok;                             // DBG: successful video RTP sends
     uint32_t dbg_vsend_skip;                           // DBG: skipped non-I before first key
     uint32_t dbg_vget_fail;                            // DBG: get-frame callback failures
-    uint32_t dbg_vsend_fail;                           // video sends that returned an error
-    uint32_t dbg_asend_fail;                           // audio sends that returned an error
+    uint32_t                  dbg_vsend_fail;                           // video sends that returned an error
+    uint32_t                  dbg_asend_fail;                           // audio sends that returned an error
 
     /* Rate control: how full the video transport queue is, and the bitrate the
      * encoder has been told to produce as a result. See __p2p_rate_control. */
-    uint32_t tx_fill_pct;      // occupancy of the video send queue, 0-100
-    uint32_t tx_full_cnt;      // times a frame did not fit, this session
-    uint32_t tx_max_frame;     // largest frame offered, sizes the queue floor
-    uint32_t rc_fill_peak;     // worst occupancy seen in the current window
-    uint32_t rc_fill_sum;      // occupancy accumulated over the window
-    uint32_t rc_fill_samples;  // samples behind rc_fill_sum
-    uint32_t rc_full_at_start; // tx_full_cnt when the window opened
-    uint32_t rc_warmup;        // windows skipped while the link settles
-    RC_STATE_E rc_state;       // increase / hold / decrease, see the draft
-    uint64_t rc_window_ms;     // when the current window opened
-    uint32_t rc_bw_kbps;       // smoothed link capacity the transport measured
-    uint32_t rc_base_kbps;     // configured rate, the ceiling to return to
-    uint32_t rc_cur_kbps;      // rate currently commanded
-    uint64_t iframe_req_ms;    // last key frame request, to rate limit them
+    uint32_t   tx_fill_pct;                             // occupancy of the video send queue, 0-100
+    uint32_t   tx_full_cnt;                             // times a frame did not fit, this session
+    uint32_t   tx_max_frame;                            // largest frame offered, sizes the queue floor
+    uint32_t   rc_fill_peak;                            // worst occupancy seen in the current window
+    uint32_t   rc_fill_sum;                             // occupancy accumulated over the window
+    uint32_t   rc_fill_samples;                         // samples behind rc_fill_sum
+    uint32_t   rc_full_at_start;                        // tx_full_cnt when the window opened
+    uint32_t   rc_warmup;                               // windows skipped while the link settles
+    RC_STATE_E rc_state;                                // increase / hold / decrease, see the draft
+    uint64_t   rc_window_ms;                            // when the current window opened
+    uint32_t   rc_bw_kbps;                              // smoothed link capacity the transport measured
+    uint32_t   rc_base_kbps;                            // configured rate, the ceiling to return to
+    uint32_t   rc_cur_kbps;                             // rate currently commanded
+    uint64_t   iframe_req_ms;                           // last key frame request, to rate limit them
     BOOL_T video_frame_pending;                     // Hold last get_frame until RTP send succeeds
 
     tuya_p2p_rtc_disconnect_cb_t on_disconnect_callback;
@@ -238,12 +231,8 @@ void ctx_listen_thread_func(void *arg)
         PR_NOTICE("__p2p_deal_with_listen, session[%d]", session_id);
         p2p_deal_with_listen(session_id);
     }
-    /*
-     * Clear the started flag on the way out. It is what p2p_rtc_listen_start
-     * checks, so leaving it set after the loop ends means nothing can ever
-     * accept a peer again - the device stays online and reachable, silently
-     * refusing every connection until the process is restarted.
-     */
+    /* p2p_rtc_listen_start checks this flag; leaving it set after the loop ends
+     * means the thread never restarts. */
     g_listen_start = 0;
     PR_ERR("p2p listen task exit - no further peers will be accepted until listen is restarted");
     return;
@@ -298,14 +287,8 @@ OPERATE_RET p2p_deal_with_listen(int session)
         return OPRT_COM_ERROR;
     }
 
-    /*
-     * There is one session context, so there can be one peer. Without this the
-     * second caller would overwrite the first one's session id and buffers in
-     * place - the original peer is never closed and the sender starts pushing
-     * its frames at whoever arrived last. The RTC layer is configured to admit
-     * only one today, which is what has been hiding this; the check belongs
-     * here anyway, where the single context actually lives.
-     */
+    /* One session context means one peer; a second caller would overwrite the
+     * first while its threads are still reading it. */
     if (P2P_SESSION_IDLE != sg_p2p_session->status) {
         PR_WARN("session[%d] already active (status %d), reject session[%d]", sg_p2p_session->session,
                 sg_p2p_session->status, session);
@@ -376,14 +359,9 @@ OPERATE_RET p2p_get_userinfo(int session, int p2pType)
     int32_t tmpSize = 0;
     BOOL_T flag = FALSE;
     int timeout = P2P_RECV_TIMEOUT; // ms
-    /*
-     * P2P_CHECK_USER_TIMES is the budget for this handshake and reads "10s";
-     * the extra factor of six stretched it to a full minute, during which the
-     * listener is deaf and logs nothing, so a peer whose first packet went
-     * missing could not get in by retrying either - the app reports "failed to
-     * get the stream" and its retry button does nothing until the minute is up.
-     */
-    int retry = P2P_CHECK_USER_TIMES / timeout;
+    /* P2P_CHECK_USER_TIMES already reads 10s; the extra factor of six stretched
+     * the handshake timeout to a minute. */
+    int retry      = P2P_CHECK_USER_TIMES / timeout;
     int total_read = 0;
 
     memset(&strUserInfo, 0x00, sizeof(P2P_CMD_PASSWD_T));
@@ -653,14 +631,8 @@ OPERATE_RET p2p_send_rtp_data(int client, int channel, char *buff, int length)
         return OPRT_RESOURCE_NOT_READY;
     }
     if (ret > 0 && ret < length) {
-        /*
-         * Part of this RTP packet is already on the wire. Reporting it as
-         * retryable makes the caller send the whole packet again, so the peer
-         * receives a truncated packet followed by a complete one and has to
-         * resynchronise. Nothing here can take those bytes back, so treat it
-         * as a hard error: the frame is abandoned and the next I-frame
-         * recovers the stream cleanly.
-         */
+        /* Part of this RTP packet is already on the wire, so a retry would duplicate
+         * the sent half. Fail the frame instead. */
         PR_ERR("partial write %d of %d on channel %d, frame abandoned", ret, length, channel);
         return OPRT_COM_ERROR;
     }
@@ -701,10 +673,7 @@ static void __p2p_ext_protocol_pack(int client, int type, char *p_result, int *p
                 (int16_t)sg_p2p_session->av_Info.height[curClirtyChn];
             *(int16_t *)&p_result[sizeof(C2C_AV_TRANS_FIXED_HEADER) + 6] =
                 (int16_t)sg_p2p_session->av_Info.fps[curClirtyChn];
-            /* DBG: ground truth for what geometry the App is actually told,
-             * in-band, per I-frame. Compare against the raw encoder output
-             * (see tkl_venc_mpp.c) to tell an App-side rendering/caching issue
-             * apart from a device-side one. */
+            /* DBG: what geometry the App is actually told, per I-frame. */
             PR_DEBUG("DBG video ext-header chn=%d w=%u h=%u fps=%u", curClirtyChn,
                      sg_p2p_session->av_Info.width[curClirtyChn], sg_p2p_session->av_Info.height[curClirtyChn],
                      sg_p2p_session->av_Info.fps[curClirtyChn]);
@@ -729,18 +698,8 @@ static void __p2p_ext_protocol_pack(int client, int type, char *p_result, int *p
     return;
 }
 
-/*
- * How much video may be waiting in the transport, expressed as playout time.
- *
- * The send queue is sized in bytes - about 520 kB for a 1 Mbps stream - which
- * at that rate is four seconds of video. Anything sitting in it is latency the
- * viewer sees, so filling it is not "buffering", it is falling four seconds
- * behind. Measured on hardware the queue sat at 98% for minutes at a time.
- *
- * So the queue is bounded by time rather than by capacity: keep at most this
- * much playout queued and shed frames beyond it. A live viewer wants to see
- * now, not to eventually see everything.
- */
+/* Video allowed to wait in the transport, as playout time rather than bytes:
+ * a byte budget means a different delay at every bitrate. */
 #define P2P_TX_LATENCY_BUDGET_MS 700u
 
 /* Multiples of the largest frame seen that the queue must always accept, so
@@ -769,7 +728,7 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
 
     if (channel == TUYA_VDATA_CHANNEL) {
         /* writeSize is the whole backlog: mbuf queue plus KCP's. */
-        int used = writeSize;
+        int      used = writeSize;
         uint32_t kbps = sg_p2p_session->rc_cur_kbps ? sg_p2p_session->rc_cur_kbps : 1024u;
         /* kbps * ms / 8 == bytes of playout time */
         int budget = (int)((kbps * P2P_TX_LATENCY_BUDGET_MS) / 8u);
@@ -819,90 +778,34 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
     return ret;
 }
 
-/*
- * Encoder rate control driven by the transport.
- *
- * The transport can only carry what the link allows. Left alone the encoder
- * produces its configured bitrate regardless, so on a link that cannot take it
- * the send queue fills, frames are discarded until the next key frame, and the
- * key frame that follows - the largest frame there is - lands in a queue that
- * is still full. That cycle repeats and the viewer sees repeated multi-second
- * freezes rather than a picture that is merely softer.
- *
- * Queue occupancy is the signal: it rises before anything is lost, so acting
- * on it keeps the stream continuous. Back off multiplicatively when it climbs
- * or a frame did not fit, recover additively when it stays low - the usual
- * asymmetry, because overshooting downward costs quality for a moment while
- * overshooting upward costs frames.
- */
-/*
- * Constants follow draft-ietf-rmcat-gcc-02, the congestion control WebRTC uses
- * for exactly this job. Two of them were originally picked by eye and both were
- * wrong in the same direction - too violent:
- *
- *   - decrease was x0.75 where the draft recommends 0.85 (it allows 0.8-0.95).
- *     Cutting a quarter at a time reaches the floor in five steps, which is
- *     what the first hardware run did within five seconds of connecting.
- *   - increase added a fixed 10% *of the configured rate*. That is a constant
- *     step regardless of where the rate currently is, so at 256 kbps it was a
- *     40% jump - straight back into the ceiling that had just failed. The draft
- *     increases multiplicatively, at most 8% per second.
- */
-#define RC_WINDOW_MS      1000u /* one decision per second: slower than the queue moves */
-#define RC_FILL_HIGH_PCT  70u   /* sustained, not a momentary spike */
-#define RC_FILL_LOW_PCT   20u
-#define RC_DOWN_NUM       85u   /* x0.85 on congestion, per the draft */
-#define RC_DOWN_DEN       100u
-#define RC_UP_NUM         108u  /* x1.08 per second while the link is clear */
-#define RC_UP_DEN         100u
-#define RC_MIN_PCT        25u   /* never fall below a quarter of the configured rate */
-#define RC_FILL_EVENTS_MIN 3u   /* shed frames in a window before believing congestion */
+/* Encoder rate control driven by the transport: the link decides what the
+ * encoder may produce, not the other way round. */
+/* Constants follow draft-ietf-rmcat-gcc-02. */
+#define RC_WINDOW_MS       1000u /* one decision per second: slower than the queue moves */
+#define RC_FILL_HIGH_PCT   70u   /* sustained, not a momentary spike */
+#define RC_FILL_LOW_PCT    20u
+#define RC_DOWN_NUM        85u /* x0.85 on congestion, per the draft */
+#define RC_DOWN_DEN        100u
+#define RC_UP_NUM          108u /* x1.08 per second while the link is clear */
+#define RC_UP_DEN          100u
+#define RC_MIN_PCT         25u /* never fall below a quarter of the configured rate */
+#define RC_FILL_EVENTS_MIN 3u  /* shed frames in a window before believing congestion */
 
-/*
- * Share of the measured link the encoder is allowed to ask for.
- *
- * The transport now reports what the peer actually acknowledged, so the rate
- * can be set from the link's capacity rather than inferred from a queue that
- * only says "full" once it is too late. The remainder covers what the encoder
- * does not know about: KCP headers, the audio channel, retransmissions, and the
- * fact that a measurement is always a little behind a link that moves.
- */
-#define RC_BW_SHARE_NUM   85u
-#define RC_BW_SHARE_DEN   100u
+/* Share of the measured link the encoder may ask for; the rest covers KCP
+ * headers, audio, retransmissions and measurement lag. */
+#define RC_BW_SHARE_NUM 85u
+#define RC_BW_SHARE_DEN 100u
 
-/*
- * Smoothing on the measurement, in windows.
- *
- * The raw estimate is a windowed maximum over a few round trips and on a poor
- * link it swings hard - 37 to 192 kB/s inside ten seconds was measured on the
- * board's Wi-Fi. Re-keying the encoder at that cadence would cost more than the
- * tracking is worth, so it is averaged over roughly four seconds. Congestion
- * still gets an immediate response: that path does not go through the average.
- */
-#define RC_BW_SMOOTH_OLD  3u
-#define RC_BW_SMOOTH_DEN  4u
+/* Smoothing on the measurement: the raw estimate swings hard on a poor link
+ * and re-keying the encoder that often costs more than the tracking is worth. */
+#define RC_BW_SMOOTH_OLD 3u
+#define RC_BW_SMOOTH_DEN 4u
 
-/*
- * Smallest change worth reprogramming the encoder for.
- *
- * Changing the bitrate is not free: the encoder is reconfigured and emits a
- * fresh key frame, so a controller that nudges the rate every second spends a
- * large part of the link on key frames it created itself. Measured, the output
- * reached 1200-1400 kbps while the target was 256 kbps, with two key frames a
- * second against a two second GOP.
- *
- * Kept below the algorithm's own step sizes (x0.85 down, x1.08 up) so it only
- * filters noise - the Hold state is what actually keeps the number of changes
- * down, by not changing anything at all while the queue drains.
- */
+/* Smallest change worth reprogramming the encoder for: every reconfiguration
+ * emits a fresh key frame. */
 #define RC_MIN_CHANGE_PCT 5u
-/*
- * Windows to let pass before acting. A session opens with a cold KCP window and
- * a key frame, so the queue is briefly deep through no fault of the encoder;
- * measured on hardware, reacting to that alone walked the rate from 1024 down
- * to the floor within five seconds of connecting, then spent eight climbing
- * back. Judge the link once it is actually running.
- */
+/* Windows to let pass before acting: a session opens with a cold KCP window
+ * and a key frame, so the queue is briefly deep through no fault of the encoder. */
 #define RC_WARMUP_WINDOWS 2u
 
 static void __p2p_rate_control(P2P_SESSION_T *pSession)
@@ -921,7 +824,7 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
         pSession->rc_fill_peak = pSession->tx_fill_pct;
     }
     if (pSession->rc_window_ms == 0) {
-        pSession->rc_window_ms = now;
+        pSession->rc_window_ms     = now;
         pSession->rc_full_at_start = pSession->tx_full_cnt;
         return;
     }
@@ -929,9 +832,9 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
         return;
     }
 
-    fills = pSession->tx_full_cnt - pSession->rc_full_at_start;
-    avg_fill = pSession->rc_fill_samples ? (pSession->rc_fill_sum / pSession->rc_fill_samples) : 0;
-    want = pSession->rc_cur_kbps;
+    fills      = pSession->tx_full_cnt - pSession->rc_full_at_start;
+    avg_fill   = pSession->rc_fill_samples ? (pSession->rc_fill_sum / pSession->rc_fill_samples) : 0;
+    want       = pSession->rc_cur_kbps;
     floor_kbps = pSession->rc_base_kbps * RC_MIN_PCT / 100u;
     if (floor_kbps == 0) {
         floor_kbps = 1;
@@ -944,7 +847,7 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
     {
         uint32_t bw_bps = 0;
         if (tuya_p2p_rtc_get_link_rate(pSession->session, TUYA_VDATA_CHANNEL, &bw_bps, NULL) == 0 && bw_bps > 0) {
-            uint32_t bw_kbps = (uint32_t)(((uint64_t)bw_bps * 8u) / 1000u);
+            uint32_t bw_kbps     = (uint32_t)(((uint64_t)bw_bps * 8u) / 1000u);
             pSession->rc_bw_kbps = (pSession->rc_bw_kbps == 0)
                                        ? bw_kbps
                                        : ((pSession->rc_bw_kbps * RC_BW_SMOOTH_OLD) + bw_kbps) / RC_BW_SMOOTH_DEN;
@@ -1005,7 +908,7 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
             case RC_STATE_HOLD:
                 /* Rate stays put until the backlog has genuinely gone. */
                 if (overuse) {
-                    want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                    want               = want * RC_DOWN_NUM / RC_DOWN_DEN;
                     pSession->rc_state = RC_STATE_DECREASE;
                 } else if (drained) {
                     pSession->rc_state = RC_STATE_INCREASE;
@@ -1015,7 +918,7 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
             case RC_STATE_INCREASE:
             default:
                 if (overuse) {
-                    want = want * RC_DOWN_NUM / RC_DOWN_DEN;
+                    want               = want * RC_DOWN_NUM / RC_DOWN_DEN;
                     pSession->rc_state = RC_STATE_DECREASE;
                 } else if (drained && want < pSession->rc_base_kbps) {
                     want = want * RC_UP_NUM / RC_UP_DEN;
@@ -1036,8 +939,8 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
     }
 
     if (want != pSession->rc_cur_kbps) {
-        uint32_t delta = (want > pSession->rc_cur_kbps) ? (want - pSession->rc_cur_kbps)
-                                                        : (pSession->rc_cur_kbps - want);
+        uint32_t delta =
+            (want > pSession->rc_cur_kbps) ? (want - pSession->rc_cur_kbps) : (pSession->rc_cur_kbps - want);
 
         /* Worth a reconfiguration, or at the floor/ceiling where the exact
          * value matters more than the size of the step. */
@@ -1056,11 +959,11 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
         }
     }
 
-    pSession->rc_window_ms = now;
+    pSession->rc_window_ms     = now;
     pSession->rc_full_at_start = pSession->tx_full_cnt;
-    pSession->rc_fill_peak = pSession->tx_fill_pct;
-    pSession->rc_fill_sum = 0;
-    pSession->rc_fill_samples = 0;
+    pSession->rc_fill_peak     = pSession->tx_fill_pct;
+    pSession->rc_fill_sum      = 0;
+    pSession->rc_fill_samples  = 0;
 }
 
 /*
@@ -1219,7 +1122,7 @@ static OPERATE_RET __p2p_pack_h265_rtp_and_send(int client, char *pData, int len
     rtp_pack_nal_arg.client = client;
     rtp_pack_nal_arg.channel = TUYA_VDATA_CHANNEL;
     rtp_pack_nal_arg.p_rtp_buff = sg_p2p_session->p_video_rtp_buff;
-    rtp_pack_nal_arg.sent_pkts = 0;
+    rtp_pack_nal_arg.sent_pkts  = 0;
     memset(rtp_pack_nal_arg.ext_head_buff, 0, P2P_EXT_HEAD_MAX_LEN);
     __p2p_ext_protocol_pack(client, 0, rtp_pack_nal_arg.ext_head_buff, &rtp_pack_nal_arg.fix_len);
 
@@ -1232,7 +1135,7 @@ static OPERATE_RET __p2p_pack_h265_rtp_and_send(int client, char *pData, int len
     uint32_t ssrc = 10;
     uint32_t timestamp = __p2p_video_rtp_timestamp_ms90();
     pRtpDelegate = rtp_payload_encode_create(/*H265_PAY_LOAD*/ 95, "H265", seq, ssrc, &rtp_packer, &rtp_pack_nal_arg);
-    ret = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
+    ret                = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
     rtp_payload_encode_getinfo(pRtpDelegate, &sg_p2p_session->video_seq_num, &timestamp);
     rtp_payload_encode_destroy(pRtpDelegate);
     if (0 != ret) {
@@ -1288,7 +1191,7 @@ static OPERATE_RET __p2p_pack_h264_rtp_and_send(int client, char *pData, int len
     rtp_pack_nal_arg.client = client;
     rtp_pack_nal_arg.channel = TUYA_VDATA_CHANNEL;
     rtp_pack_nal_arg.p_rtp_buff = sg_p2p_session->p_video_rtp_buff;
-    rtp_pack_nal_arg.sent_pkts = 0;
+    rtp_pack_nal_arg.sent_pkts  = 0;
     memset(rtp_pack_nal_arg.ext_head_buff, 0, P2P_EXT_HEAD_MAX_LEN);
     __p2p_ext_protocol_pack(client, 0, rtp_pack_nal_arg.ext_head_buff, &rtp_pack_nal_arg.fix_len);
 
@@ -1426,7 +1329,7 @@ static OPERATE_RET __p2p_pack_g711_rtp_and_send(int client, char *pData, int len
     rtp_pack_nal_arg.client = client;
     rtp_pack_nal_arg.channel = TUYA_ADATA_CHANNEL;
     rtp_pack_nal_arg.p_rtp_buff = sg_p2p_session->p_audio_rtp_buff;
-    rtp_pack_nal_arg.sent_pkts = 0;
+    rtp_pack_nal_arg.sent_pkts  = 0;
     memset(rtp_pack_nal_arg.ext_head_buff, 0, P2P_EXT_HEAD_MAX_LEN);
     __p2p_ext_protocol_pack(client, 1, rtp_pack_nal_arg.ext_head_buff, &rtp_pack_nal_arg.fix_len);
 
@@ -1451,7 +1354,7 @@ static OPERATE_RET __p2p_pack_g711_rtp_and_send(int client, char *pData, int len
         payload = 99 /*RTP_PCM_PAYLOAD*/;
     }
     pRtpDelegate = rtp_payload_encode_create(payload, codec_name, seq, ssrc, &rtp_packer, &rtp_pack_nal_arg);
-    ret = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
+    ret          = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
     rtp_payload_encode_getinfo(pRtpDelegate, &sg_p2p_session->audio_seq_num, &timestamp);
     rtp_payload_encode_destroy(pRtpDelegate);
     if (0 != ret) {
@@ -1560,20 +1463,20 @@ static int __p2p_session_trans_video_start(P2P_SESSION_T *pSession)
     /* Rate control starts from whatever the stream is configured to produce,
      * which is also its ceiling, so pick that up here. */
     pSession->rc_base_kbps = pSession->av_Info.bitrate[p2p_get_chn_idx(pSession->cur_clarity)];
-    pSession->rc_cur_kbps = pSession->rc_base_kbps;
+    pSession->rc_cur_kbps  = pSession->rc_base_kbps;
     /* A new session gets a new transport and a new estimate; carrying the old
      * link's capacity across would set the opening rate from a path that is no
      * longer in use. */
-    pSession->rc_bw_kbps = 0;
-    pSession->rc_window_ms = 0;
-    pSession->rc_fill_peak = 0;
-    pSession->rc_fill_sum = 0;
-    pSession->rc_fill_samples = 0;
-    pSession->rc_warmup = 0;
-    pSession->rc_state = RC_STATE_INCREASE;
-    pSession->tx_max_frame = 0;
+    pSession->rc_bw_kbps       = 0;
+    pSession->rc_window_ms     = 0;
+    pSession->rc_fill_peak     = 0;
+    pSession->rc_fill_sum      = 0;
+    pSession->rc_fill_samples  = 0;
+    pSession->rc_warmup        = 0;
+    pSession->rc_state         = RC_STATE_INCREASE;
+    pSession->tx_max_frame     = 0;
     pSession->rc_full_at_start = pSession->tx_full_cnt;
-    pSession->iframe_req_ms = 0;
+    pSession->iframe_req_ms    = 0;
 
     if (pSession->on_live_video_start_callback) {
         (void)pSession->on_live_video_start_callback();
@@ -2604,7 +2507,7 @@ static void __p2p_media_send_proc(void *pArg)
                 tal_system_sleep(10);
             } else {
                 MEDIA_FRAME *pMediaFrame = &sg_p2p_session->media_frame;
-                OPERATE_RET buf_ret;
+                OPERATE_RET  buf_ret;
                 uint32_t backoff_ms;
 
                 if (!pSession->video_frame_pending) {
@@ -2802,7 +2705,7 @@ int __p2p_session_release_va(P2P_SESSION_T *pSession)
     pSession->dbg_vsend_ok = 0;
     pSession->dbg_vsend_skip = 0;
     pSession->dbg_vget_fail = 0;
-    notify = pSession->on_disconnect_callback;
+    notify                        = pSession->on_disconnect_callback;
     tal_mutex_unlock(pSession->cmutex);
 
     /* Outside the lock: this runs application code, which is free to call back
@@ -2909,7 +2812,7 @@ OPERATE_RET p2p_init(const TUYA_IPC_P2P_VAR_T *p_var)
     sg_p2p_session->on_live_audio_start_callback = p_var->on_live_audio_start_callback;
     sg_p2p_session->on_live_audio_stop_callback = p_var->on_live_audio_stop_callback;
     sg_p2p_session->on_recv_audio_frame_callback = p_var->on_recv_audio_frame_callback;
-    sg_p2p_session->on_request_i_frame_callback = p_var->on_request_i_frame_callback;
+    sg_p2p_session->on_request_i_frame_callback   = p_var->on_request_i_frame_callback;
     sg_p2p_session->on_set_video_bitrate_callback = p_var->on_set_video_bitrate_callback;
     sg_p2p_session->on_live_video_start_callback = p_var->on_live_video_start_callback;
     sg_p2p_session->on_live_video_stop_callback = p_var->on_live_video_stop_callback;

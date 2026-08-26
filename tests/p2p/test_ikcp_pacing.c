@@ -1,12 +1,9 @@
-/*
- * Host test for KCP send pacing.
- *
- * Pacing can only be judged against a link that pushes back, so this drives two
- * real ikcpcb instances through a simulated bottleneck: a fixed serialisation
- * rate, a propagation delay, and a finite queue that tail drops. That is enough
- * to reproduce the two behaviours the device showed - a pacer that outruns the
- * link fills the queue and loses a contiguous run, and a pacer that cannot
- * express a rate below one packet per flush period cannot slow down at all.
+/**
+ * @file test_ikcp_pacing.c
+ * @brief Host test for KCP send pacing against a simulated bottleneck
+ * @version 1.0
+ * @date 2026-08-26
+ * @copyright Copyright (c) Tuya Inc.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,20 +27,20 @@ static void check(const char *what, int ok, const char *detail)
 #define LINK_CAPACITY_PKTS 256
 
 struct link_pkt {
-    IUINT32 arrive;              /* when the far end may read it */
-    int len;
-    char buf[2048];
+    IUINT32 arrive; /* when the far end may read it */
+    int     len;
+    char    buf[2048];
 };
 
 struct link {
     struct link_pkt q[LINK_CAPACITY_PKTS];
-    int head, tail;              /* ring; tail is one past the last */
-    IUINT32 free_at;             /* when the wire finishes the packet before */
-    IUINT32 bps;                 /* capacity in bytes per second */
-    IUINT32 delay;               /* one-way propagation, ms */
-    int depth_max;               /* deepest the queue ever got */
-    int drops;
-    ikcpcb *peer;                /* who receives out of this link */
+    int             head, tail; /* ring; tail is one past the last */
+    IUINT32         free_at;    /* when the wire finishes the packet before */
+    IUINT32         bps;        /* capacity in bytes per second */
+    IUINT32         delay;      /* one-way propagation, ms */
+    int             depth_max;  /* deepest the queue ever got */
+    int             drops;
+    ikcpcb         *peer; /* who receives out of this link */
 };
 
 static int link_depth(const struct link *l)
@@ -59,9 +56,9 @@ static int link_depth(const struct link *l)
 static void link_send(struct link *l, const char *buf, int len, IUINT32 now)
 {
     IUINT32 depart, serialise;
-    int next = (l->tail + 1) % LINK_CAPACITY_PKTS;
+    int     next = (l->tail + 1) % LINK_CAPACITY_PKTS;
 
-    if (next == l->head) {       /* queue full - tail drop, as a real one does */
+    if (next == l->head) { /* queue full - tail drop, as a real one does */
         l->drops++;
         return;
     }
@@ -74,7 +71,7 @@ static void link_send(struct link *l, const char *buf, int len, IUINT32 now)
     l->free_at = depart;
 
     l->q[l->tail].arrive = depart + l->delay;
-    l->q[l->tail].len = len;
+    l->q[l->tail].len    = len;
     memcpy(l->q[l->tail].buf, buf, (size_t)len);
     l->tail = next;
 
@@ -94,14 +91,15 @@ static void link_deliver(struct link *l, IUINT32 now)
 /* ---------------------------------------------------------------------------
  * Harness
  * --------------------------------------------------------------------------- */
-static struct link g_fwd;        /* sender -> receiver, the bottleneck */
-static struct link g_rev;        /* receiver -> sender, acks only */
-static IUINT32 g_now;
-static long g_sent_wire;         /* everything the sender put on the wire */
+static struct link g_fwd; /* sender -> receiver, the bottleneck */
+static struct link g_rev; /* receiver -> sender, acks only */
+static IUINT32     g_now;
+static long        g_sent_wire; /* everything the sender put on the wire */
 
 static int out_fwd(const char *buf, int len, ikcpcb *kcp, void *user)
 {
-    (void)kcp; (void)user;
+    (void)kcp;
+    (void)user;
     g_sent_wire += len;
     link_send(&g_fwd, buf, len, g_now);
     return 0;
@@ -109,15 +107,16 @@ static int out_fwd(const char *buf, int len, ikcpcb *kcp, void *user)
 
 static int out_rev(const char *buf, int len, ikcpcb *kcp, void *user)
 {
-    (void)kcp; (void)user;
+    (void)kcp;
+    (void)user;
     link_send(&g_rev, buf, len, g_now);
     return 0;
 }
 
 struct run_result {
-    long goodput_bps;            /* bytes/sec the receiver actually got */
-    int queue_max;               /* deepest the bottleneck queue got */
-    int drops;
+    long    goodput_bps; /* bytes/sec the receiver actually got */
+    int     queue_max;   /* deepest the bottleneck queue got */
+    int     drops;
     IUINT32 srtt;
     IUINT32 min_rtt;
 };
@@ -130,19 +129,19 @@ struct run_result {
  */
 static struct run_result run_flow(IUINT32 link_bps, IUINT32 delay_ms, IUINT32 ms)
 {
-    ikcpcb *snd, *rcv;
+    ikcpcb           *snd, *rcv;
     struct run_result r;
-    char payload[1024];
-    char sink[4096];
-    long received = 0;
-    IUINT32 t;
+    char              payload[1024];
+    char              sink[4096];
+    long              received = 0;
+    IUINT32           t;
 
     memset(&g_fwd, 0, sizeof(g_fwd));
     memset(&g_rev, 0, sizeof(g_rev));
     memset(&r, 0, sizeof(r));
     memset(payload, 'x', sizeof(payload));
     g_sent_wire = 0;
-    g_now = 0;
+    g_now       = 0;
 
     snd = ikcp_create(1, NULL);
     rcv = ikcp_create(1, NULL);
@@ -155,14 +154,14 @@ static struct run_result run_flow(IUINT32 link_bps, IUINT32 delay_ms, IUINT32 ms
     ikcp_nodelay(snd, 1, 10, 2, 1);
     ikcp_nodelay(rcv, 1, 10, 2, 1);
 
-    g_fwd.bps = link_bps;
+    g_fwd.bps   = link_bps;
     g_fwd.delay = delay_ms;
-    g_fwd.peer = rcv;
+    g_fwd.peer  = rcv;
     /* The return path is not under test: make it quick and roomy so acks are
      * never the thing being measured. */
-    g_rev.bps = 1000000;
+    g_rev.bps   = 1000000;
     g_rev.delay = delay_ms;
-    g_rev.peer = snd;
+    g_rev.peer  = snd;
 
     for (t = 0; t < ms; t++) {
         g_now = t;
@@ -188,10 +187,10 @@ static struct run_result run_flow(IUINT32 link_bps, IUINT32 delay_ms, IUINT32 ms
     }
 
     r.goodput_bps = (long)(((IUINT64)received * 1000u) / ms);
-    r.queue_max = g_fwd.depth_max;
-    r.drops = g_fwd.drops;
-    r.srtt = (IUINT32)snd->rx_srtt;
-    r.min_rtt = pacing_min_rtt(snd);
+    r.queue_max   = g_fwd.depth_max;
+    r.drops       = g_fwd.drops;
+    r.srtt        = (IUINT32)snd->rx_srtt;
+    r.min_rtt     = pacing_min_rtt(snd);
 
     ikcp_release(snd);
     ikcp_release(rcv);
@@ -213,13 +212,12 @@ int main(void)
      * 200 kbit/s is 25000 B/s; a flow that respects it should land near that
      * and should not need the queue to be deep to do so. */
     {
-        struct run_result r = run_flow(25000, 20, 12000);
-        long expect = 25000;
+        struct run_result r      = run_flow(25000, 20, 12000);
+        long              expect = 25000;
 
-        snprintf(buf, sizeof(buf), "%ld B/s on a %ld B/s link, queue peak %d, drops %d",
-                 r.goodput_bps, expect, r.queue_max, r.drops);
-        check("paces below one packet per period",
-              r.goodput_bps > (expect * 6) / 10 && r.goodput_bps <= expect, buf);
+        snprintf(buf, sizeof(buf), "%ld B/s on a %ld B/s link, queue peak %d, drops %d", r.goodput_bps, expect,
+                 r.queue_max, r.drops);
+        check("paces below one packet per period", r.goodput_bps > (expect * 6) / 10 && r.goodput_bps <= expect, buf);
 
         /* The point of pacing at the delivery rate rather than cwnd/srtt: the
          * bottleneck queue should stay shallow instead of being discovered. */
@@ -234,11 +232,11 @@ int main(void)
      * climb. The gain cycle is the answer, so prove the flow reaches a link an
      * order of magnitude faster than the one above. */
     {
-        struct run_result r = run_flow(250000, 20, 12000);
-        long expect = 250000;
+        struct run_result r      = run_flow(250000, 20, 12000);
+        long              expect = 250000;
 
-        snprintf(buf, sizeof(buf), "%ld B/s on a %ld B/s link (%ld pct)",
-                 r.goodput_bps, expect, (r.goodput_bps * 100) / expect);
+        snprintf(buf, sizeof(buf), "%ld B/s on a %ld B/s link (%ld pct)", r.goodput_bps, expect,
+                 (r.goodput_bps * 100) / expect);
         check("finds a link 10x faster", r.goodput_bps > (expect * 5) / 10, buf);
     }
 
@@ -257,10 +255,9 @@ int main(void)
     {
         struct run_result r = run_flow(25000, 5, 12000);
 
-        snprintf(buf, sizeof(buf), "srtt %u ms against a measured floor of %u ms, queue peak %d",
-                 r.srtt, r.min_rtt, r.queue_max);
-        check("does not inflate rtt into the queue",
-              r.min_rtt > 0 && r.srtt < r.min_rtt * 3, buf);
+        snprintf(buf, sizeof(buf), "srtt %u ms against a measured floor of %u ms, queue peak %d", r.srtt, r.min_rtt,
+                 r.queue_max);
+        check("does not inflate rtt into the queue", r.min_rtt > 0 && r.srtt < r.min_rtt * 3, buf);
     }
 
     printf("\n%s\n", g_fail ? "RESULT: FAIL" : "RESULT: PASS");

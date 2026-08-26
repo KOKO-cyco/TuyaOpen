@@ -14,12 +14,7 @@
 /* ---------------------------------------------------------------------------
  * Macros
  * --------------------------------------------------------------------------- */
-/*
- * Slot count is really a memory budget: each slot holds one encoded frame.
- * 8 slots is 0.32s at 25fps, thin enough that a brief reader stall forces the
- * skip path below. MCUs pay for this out of scarce PSRAM and keep the small
- * cap; Linux has no such constraint, so let the requested fps*seconds stand.
- */
+/* Slot count is a memory budget: one encoded frame per slot. */
 #if defined(SYSTEM_LINUX) && (OPERATING_SYSTEM == SYSTEM_LINUX)
 #define RBUF_MAX_SLOTS 64
 #else
@@ -49,7 +44,7 @@ typedef struct {
     uint32_t max_frame_size;
     uint32_t write_idx;
     uint32_t seq;
-    uint32_t skip_cnt; /* frames skipped because the reader fell behind */
+    uint32_t           skip_cnt; /* frames skipped because the reader fell behind */
     RING_BUFFER_NODE_T nodes[RBUF_MAX_SLOTS];
     MUTEX_HANDLE lock;
 } RBUF_STREAM_T;
@@ -310,12 +305,12 @@ OPERATE_RET tuya_ipc_ring_buffer_append_data(RING_BUFFER_USER_HANDLE_T handle, u
 static RING_BUFFER_NODE_T *__rbuf_pick_locked(RBUF_USER_T *user, RBUF_STREAM_T *st, uint32_t *skip_from,
                                               uint32_t *skip_to)
 {
-    RING_BUFFER_NODE_T *best = NULL;
+    RING_BUFFER_NODE_T *best       = NULL;
     uint32_t newest_seq = 0;
-    uint32_t i;
+    uint32_t            i;
 
     *skip_from = 0;
-    *skip_to = 0;
+    *skip_to   = 0;
     for (i = 0; i < st->slot_cnt; i++) {
         RING_BUFFER_NODE_T *n = &st->nodes[i];
         if (n->seq_no == 0 || n->size == 0) {
@@ -333,14 +328,7 @@ static RING_BUFFER_NODE_T *__rbuf_pick_locked(RBUF_USER_T *user, RBUF_STREAM_T *
     if (best != NULL && newest_seq > 0 && (newest_seq - best->seq_no) > (st->slot_cnt / 2)) {
         RING_BUFFER_NODE_T *newest_key = NULL;
 
-        /*
-         * Too far behind to catch up in sequence. Skipping is unavoidable here,
-         * but landing on a P-frame hands the peer a stream it cannot decode
-         * until the next I-frame, which is seen as a multi-second freeze. Jump
-         * to the newest I-frame still held instead; if the ring has none, stay
-         * in sequence and let the reader crawl forward rather than emit a jump
-         * nothing can decode.
-         */
+        /* Too far behind to catch up in sequence; resume at the newest key frame. */
         for (i = 0; i < st->slot_cnt; i++) {
             RING_BUFFER_NODE_T *n = &st->nodes[i];
             if (n->seq_no == 0 || n->size == 0 || n->seq_no <= user->read_seq) {
@@ -355,8 +343,8 @@ static RING_BUFFER_NODE_T *__rbuf_pick_locked(RBUF_USER_T *user, RBUF_STREAM_T *
         }
         if (newest_key != NULL) {
             *skip_from = best->seq_no;
-            *skip_to = newest_key->seq_no;
-            best = newest_key;
+            *skip_to   = newest_key->seq_no;
+            best       = newest_key;
         }
     }
     return best;
@@ -388,10 +376,10 @@ static void __rbuf_report_skip(RBUF_STREAM_T *st, uint32_t skip_from, uint32_t s
  */
 RING_BUFFER_NODE_T *tuya_ipc_ring_buffer_get_frame(RING_BUFFER_USER_HANDLE_T handle, BOOL_T is_retry)
 {
-    RBUF_USER_T *user = (RBUF_USER_T *)handle;
-    RBUF_STREAM_T *st;
+    RBUF_USER_T        *user = (RBUF_USER_T *)handle;
+    RBUF_STREAM_T      *st;
     RING_BUFFER_NODE_T *best;
-    uint32_t skip_from = 0, skip_to = 0;
+    uint32_t            skip_from = 0, skip_to = 0;
 
     (void)is_retry;
     if (user == NULL || user->open_type != E_RBUF_READ) {
@@ -420,11 +408,11 @@ RING_BUFFER_NODE_T *tuya_ipc_ring_buffer_get_frame(RING_BUFFER_USER_HANDLE_T han
 OPERATE_RET tuya_ipc_ring_buffer_read_frame(RING_BUFFER_USER_HANDLE_T handle, uint8_t *dst, uint32_t dst_cap,
                                             RING_BUFFER_NODE_T *out)
 {
-    RBUF_USER_T *user = (RBUF_USER_T *)handle;
-    RBUF_STREAM_T *st;
+    RBUF_USER_T        *user = (RBUF_USER_T *)handle;
+    RBUF_STREAM_T      *st;
     RING_BUFFER_NODE_T *best;
-    OPERATE_RET rt = OPRT_RESOURCE_NOT_READY;
-    uint32_t skip_from = 0, skip_to = 0;
+    OPERATE_RET         rt        = OPRT_RESOURCE_NOT_READY;
+    uint32_t            skip_from = 0, skip_to = 0;
 
     if (user == NULL || user->open_type != E_RBUF_READ || dst == NULL || out == NULL) {
         return OPRT_INVALID_PARM;
@@ -444,10 +432,10 @@ OPERATE_RET tuya_ipc_ring_buffer_read_frame(RING_BUFFER_USER_HANDLE_T handle, ui
             /* Copied here rather than by the caller: the slot is the writer's
              * to reuse the instant this lock is dropped. */
             memcpy(dst, best->raw_data, best->size);
-            *out = *best;
-            out->raw_data = dst;
+            *out           = *best;
+            out->raw_data  = dst;
             user->read_seq = best->seq_no;
-            rt = OPRT_OK;
+            rt             = OPRT_OK;
         }
     }
     tal_mutex_unlock(st->lock);
@@ -465,7 +453,7 @@ void tuya_ipc_ring_buffer_clean_user_state(RING_BUFFER_USER_HANDLE_T handle)
 {
     RBUF_USER_T *user = (RBUF_USER_T *)handle;
     RBUF_STREAM_T *st;
-    uint32_t i;
+    uint32_t       i;
 
     if (user == NULL) {
         return;
@@ -476,12 +464,7 @@ void tuya_ipc_ring_buffer_clean_user_state(RING_BUFFER_USER_HANDLE_T handle)
         return;
     }
 
-    /*
-     * Forward to the newest frame held, which is what a reader attaching or
-     * reattaching wants. Rewinding to zero instead - as this used to - makes
-     * the next read start from the oldest slot, so a viewer that reconnects is
-     * served the whole ring of stale video before catching up to live.
-     */
+    /* Forward to the newest frame held, which is what a late reader wants. */
     tal_mutex_lock(st->lock);
     user->read_seq = 0;
     for (i = 0; i < st->slot_cnt; i++) {

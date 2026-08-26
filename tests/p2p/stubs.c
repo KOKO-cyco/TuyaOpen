@@ -1,8 +1,12 @@
-/* Minimal stand-ins so ikcp.c links in a host test: the congestion control
- * under test touches none of these paths.
- *
- * Pacing used to be stubbed out here too. It is linked for real now - it takes
- * part in every flush, so a test that stubbed it would be measuring a send path
- * the device does not run. */
+/**
+ * @file stubs.c
+ * @brief Platform stubs so the P2P transport links on the host
+ * @version 1.0
+ * @date 2026-08-26
+ * @copyright Copyright (c) Tuya Inc.
+ */
 #include <stddef.h>
-void tuya_mbuf_free(void *m) { (void)m; }
+void tuya_mbuf_free(void *m)
+{
+    (void)m;
+}

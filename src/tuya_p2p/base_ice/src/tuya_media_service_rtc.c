@@ -1605,12 +1605,7 @@ static int on_kcp_output(const char *buf, int len, ikcpcb *kcp, void *user_data)
     // tuya_p2p_log_trace("channel_id: %08x, sn: %d, cmd: %d\n", channel_id, sn, cmd);
 
     if (cmd != KCP_CMD_PUSH || channel_id != RTC_CHANNEL_CMD) {
-        /*
-         * A failed send is not backed off here any more. Pacing now bounds what
-         * a flush may emit up front, so the ENOBUFS this used to react to should
-         * not arise; if it still does, the budget is wrong and hiding that
-         * behind a retry delay would only make it harder to see.
-         */
+        /* Pacing bounds what reaches the socket, so a failed send needs no backoff here. */
         (void)pj_ice_session_sendto(rtc->pIce, (void *)buf, len + md_size);
     }
 
@@ -2000,9 +1995,9 @@ void *rtc_worker_thread(void *arg)
     int timeout_logged = 0;
     int nego_done_logged = 0;
     /* DBG throughput: see the 2s block below */
-    uint32_t dbg_loops = 0;
-    int64_t dbg_last_write = 0;
-    int64_t dbg_last_wire = 0;
+    uint32_t dbg_loops      = 0;
+    int64_t  dbg_last_write = 0;
+    int64_t  dbg_last_wire  = 0;
 
     while (!rtc->bQuitKCPThread) {
         dbg_loops++;
@@ -2024,23 +2019,12 @@ void *rtc_worker_thread(void *arg)
             uint64_t now = tuya_p2p_misc_get_timestamp_ms();
             if ((now - last_dump_ms) >= 2000ULL) {
                 uint64_t elapsed = now - start_ms;
-                /*
-                 * DBG throughput: which of the send-side limits is actually
-                 * binding. loops is how often this thread got round to flushing
-                 * (KCP can only put segments on the wire from here), kcp_in vs
-                 * wire separates offered load from what the socket took plus
-                 * retransmissions, and cwnd/snd/rmt says which window closed.
-                 *
-                 * bw is the measured bottleneck rate pacing works from, and the
-                 * gap between srtt and minrtt is the standing queue ahead of us.
-                 * That gap is what separates a slow link from a bloated one:
-                 * they look identical in srtt alone, and the fix for each is the
-                 * opposite of the fix for the other.
-                 */
+                /* DBG: which send-side limit is binding. srtt minus minrtt is the standing
+                 * queue, the one number that separates a slow link from a bloated one. */
                 tal_mutex_lock(rtc->channel_lock);
                 if (rtc->channels != NULL && rtc->channels[1].kcp != NULL) {
                     rtc_channel_t *vch = &rtc->channels[1]; /* TUYA_VDATA_CHANNEL */
-                    ikcpcb *k = vch->kcp;
+                    ikcpcb        *k   = vch->kcp;
                     PR_NOTICE("DBG p2p tx 2s: loops=%u kcp_in=%lld wire=%lld cwnd=%u snd=%u rmt=%u "
                               "rto=%d srtt=%d minrtt=%u bw=%u xmit=%u que=%u buf=%u",
                               dbg_loops, (long long)(vch->write_bytes - dbg_last_write),
@@ -2048,10 +2032,10 @@ void *rtc_worker_thread(void *arg)
                               k->rx_rto, k->rx_srtt, pacing_min_rtt(k), pacing_bw(k), k->xmit, k->nsnd_que,
                               k->nsnd_buf);
                     dbg_last_write = vch->write_bytes;
-                    dbg_last_wire = vch->socket_send_bytes;
+                    dbg_last_wire  = vch->socket_send_bytes;
                 }
                 tal_mutex_unlock(rtc->channel_lock);
-                dbg_loops = 0;
+                dbg_loops    = 0;
                 last_dump_ms = now;
                 if (rtc->pIce != NULL && !pj_ice_session_is_nego_done(rtc->pIce)) {
                     pj_ice_session_dbg_dump(rtc->pIce, "worker_pending");
@@ -2413,7 +2397,8 @@ int32_t tuya_p2p_rtc_check_buffer(int32_t handle, uint32_t channel_id, uint32_t 
         rtc_channel_t *chan = &rtc->channels[channel_id];
         /* Align TuyaOS mid_p2p: sizes from mbuf_queue */
         if (write_size != NULL) {
-            uint32_t backlog = (chan->send_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_used_size(chan->send_queue) : 0;
+            uint32_t backlog =
+                (chan->send_queue != NULL) ? (uint32_t)tuya_mbuf_queue_get_used_size(chan->send_queue) : 0;
             /* KCP queues downstream of the mbuf queue; measured 2-3.7 s of video
              * sitting there unseen by the caller's latency budget. */
             if (chan->kcp != NULL) {
@@ -2510,10 +2495,7 @@ static int __rtc_channel_recreate_kcp(rtc_channel_t *chan, uint32_t conv)
     }
     ikcp_setoutput(chan->kcp, on_kcp_output);
     ikcp_wndsize(chan->kcp, send_wnd, recv_wnd);
-    /* Same settings as the initial create above - see the reasoning there. A
-     * channel rebuilt mid-session must not end up on a different congestion
-     * profile than the one it replaces; nocwnd in particular used to be derived
-     * from preconnect here while the create path had already stopped doing so. */
+    /* A channel rebuilt mid-session must keep the same congestion control. */
     ikcp_nodelay(chan->kcp, 0, 10, 2, 0);
     ikcp_setmtu(chan->kcp, 1400);
     ikcp_setprocesspkt(chan->kcp, ctx_session_channel_process_pkt);

@@ -137,7 +137,7 @@ OPERATE_RET tuya_ipc_p2p_update_pw(char p2p_pw[])
 OPERATE_RET tuya_ipc_p2p_get_pw(char p2p_pw[])
 {
     uint8_t *old_pwd = NULL;
-    size_t old_pwd_len = 0;
+    size_t   old_pwd_len                 = 0;
     cJSON *result = NULL;
     uint8_t new_pwd[P2P_PASSWD_LEN + 1] = {0};
     int rtyCnt = 0;
@@ -251,7 +251,7 @@ OPERATE_RET tuya_ipc_p2p_get_id(char p2p_id[])
         return OPRT_INVALID_PARM;
     }
     uint8_t *p_auth_str = NULL;
-    size_t auth_param_len = 0;
+    size_t   auth_param_len = 0;
 
     OPERATE_RET ret = tal_kv_get("p2p_auth_info", &p_auth_str, &auth_param_len);
     if ((ret != OPRT_OK) || (0 == p_auth_str[0])) {

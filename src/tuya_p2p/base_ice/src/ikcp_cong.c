@@ -2,18 +2,10 @@
  * @file ikcp_cong.c
  * @brief CUBIC congestion control for KCP
  * @version 1.0
- * @date 2026-08-13
+ * @date 2026-08-26
  * @copyright Copyright (c) Tuya Inc.
- *
- * @note Ported from the published CUBIC algorithm (RFC 8312 / Linux
- *       net/ipv4/tcp_cubic.c). The three derived constants below were checked
- *       against the compiled mid_p2p in TuyaOS 3.13.8, which stores them in
- *       its private state at init: cube_rtt_scale 410, beta_scale 15 and
- *       cube_factor 0x9FD809FD all reproduce exactly from bic_scale=41 with
- *       beta=717, so the shipping product runs stock CUBIC with stock tuning.
- *
- *       Time base differs from the kernel: KCP counts milliseconds, so HZ is
- *       1000 and every "jiffies" comparison here is already in ms.
+ * @note Ported from RFC 8312 / Linux net/ipv4/tcp_cubic.c. Derived constants
+ *       match the compiled mid_p2p in TuyaOS 3.13.8. HZ is 1000: KCP counts ms.
  */
 #include "ikcp.h"
 #include "ikcp_cong.h"
@@ -28,31 +20,30 @@
 #define BICTCP_HZ         10   /* cwnd fixed-point shift for the cubic term */
 #define CUBIC_HZ          1000 /* KCP timestamps are milliseconds */
 
-#define CUBIC_BETA        717 /* 0.7 in BICTCP_BETA_SCALE units */
-#define CUBIC_BIC_SCALE   41
-#define CUBIC_MIN_CWND    2
+#define CUBIC_BETA      717 /* 0.7 in BICTCP_BETA_SCALE units */
+#define CUBIC_BIC_SCALE 41
+#define CUBIC_MIN_CWND  2
 
 /* Do not recompute the curve more than once per this interval (kernel HZ/32). */
 #define CUBIC_MIN_RECALC_MS 30
 
 /* Derived, verified against the shipped mid_p2p private state (see file note). */
-#define CUBIC_CUBE_RTT_SCALE (CUBIC_BIC_SCALE * 10)                            /* 410 */
-#define CUBIC_BETA_SCALE_C                                                     \
-    (8 * (BICTCP_BETA_SCALE + CUBIC_BETA) / 3 / (BICTCP_BETA_SCALE - CUBIC_BETA)) /* 15 */
-#define CUBIC_CUBE_FACTOR (((IUINT64)1 << (10 + 3 * BICTCP_HZ)) / (CUBIC_BIC_SCALE * 10))
+#define CUBIC_CUBE_RTT_SCALE (CUBIC_BIC_SCALE * 10)                                                        /* 410 */
+#define CUBIC_BETA_SCALE_C   (8 * (BICTCP_BETA_SCALE + CUBIC_BETA) / 3 / (BICTCP_BETA_SCALE - CUBIC_BETA)) /* 15 */
+#define CUBIC_CUBE_FACTOR    (((IUINT64)1 << (10 + 3 * BICTCP_HZ)) / (CUBIC_BIC_SCALE * 10))
 
 /* ---------------------------------------------------------------------------
  * Type definitions
  * --------------------------------------------------------------------------- */
 struct ikcp_cubic {
-    IUINT32 cnt;             /* packets needed to raise cwnd by one */
-    IUINT32 last_max_cwnd;   /* cwnd at the previous loss */
-    IUINT32 last_cwnd;       /* cwnd when the curve was last recomputed */
-    IUINT32 last_time;       /* when the curve was last recomputed (ms) */
-    IUINT32 bic_origin_point;/* cwnd at the plateau of the cubic curve (W_max) */
-    IUINT32 bic_K;           /* time to reach the plateau, BICTCP_HZ fixed point */
-    IUINT32 delay_min;       /* smallest RTT seen (ms) */
-    IUINT32 epoch_start;     /* start of the current congestion epoch (ms) */
+    IUINT32 cnt;              /* packets needed to raise cwnd by one */
+    IUINT32 last_max_cwnd;    /* cwnd at the previous loss */
+    IUINT32 last_cwnd;        /* cwnd when the curve was last recomputed */
+    IUINT32 last_time;        /* when the curve was last recomputed (ms) */
+    IUINT32 bic_origin_point; /* cwnd at the plateau of the cubic curve (W_max) */
+    IUINT32 bic_K;            /* time to reach the plateau, BICTCP_HZ fixed point */
+    IUINT32 delay_min;        /* smallest RTT seen (ms) */
+    IUINT32 epoch_start;      /* start of the current congestion epoch (ms) */
     /*
      * Two counters, deliberately. ack_cnt feeds the TCP-friendliness estimate,
      * which consumes from it; cwnd_cnt paces the cubic increase itself. Sharing
@@ -61,9 +52,9 @@ struct ikcp_cubic {
      * all: the window sits where a loss left it. The kernel keeps these apart
      * for the same reason (ca->ack_cnt versus tp->snd_cwnd_cnt).
      */
-    IUINT32 ack_cnt;         /* ACKs counted toward the Reno comparison */
-    IUINT32 cwnd_cnt;        /* ACKs counted toward the next cubic increment */
-    IUINT32 tcp_cwnd;        /* cwnd a Reno flow would have (TCP friendliness) */
+    IUINT32 ack_cnt;  /* ACKs counted toward the Reno comparison */
+    IUINT32 cwnd_cnt; /* ACKs counted toward the next cubic increment */
+    IUINT32 tcp_cwnd; /* cwnd a Reno flow would have (TCP friendliness) */
 };
 
 /* ---------------------------------------------------------------------------
@@ -80,14 +71,14 @@ static IUINT32 __cubic_root(IUINT64 a)
 {
     IUINT64 x;
     IUINT64 pow2;
-    int b;
+    int     b;
 
     if (a == 0) {
         return 0;
     }
 
     /* Seed with 2^ceil(bits(a)/3) so the iteration starts within one octave. */
-    b = 0;
+    b    = 0;
     pow2 = a;
     while (pow2 > 0) {
         pow2 >>= 1;
@@ -118,17 +109,17 @@ static IUINT32 __cubic_root(IUINT64 a)
  */
 static void __cubic_reset(struct ikcp_cubic *ca)
 {
-    ca->cnt = 0;
-    ca->last_max_cwnd = 0;
-    ca->last_cwnd = 0;
-    ca->last_time = 0;
+    ca->cnt              = 0;
+    ca->last_max_cwnd    = 0;
+    ca->last_cwnd        = 0;
+    ca->last_time        = 0;
     ca->bic_origin_point = 0;
-    ca->bic_K = 0;
-    ca->delay_min = 0;
-    ca->epoch_start = 0;
-    ca->ack_cnt = 0;
-    ca->cwnd_cnt = 0;
-    ca->tcp_cwnd = 0;
+    ca->bic_K            = 0;
+    ca->delay_min        = 0;
+    ca->epoch_start      = 0;
+    ca->ack_cnt          = 0;
+    ca->cwnd_cnt         = 0;
+    ca->tcp_cwnd         = 0;
 }
 
 /**
@@ -168,19 +159,19 @@ static void __cubic_update(ikcpcb *kcp, struct ikcp_cubic *ca, IUINT32 cwnd, IUI
 
     if (ca->epoch_start == 0) {
         ca->epoch_start = now;
-        ca->ack_cnt = acked;
-        ca->tcp_cwnd = cwnd;
+        ca->ack_cnt     = acked;
+        ca->tcp_cwnd    = cwnd;
 
         if (ca->last_max_cwnd <= cwnd) {
             /* Already above the last loss point: plateau is here, climb now. */
-            ca->bic_K = 0;
+            ca->bic_K            = 0;
             ca->bic_origin_point = cwnd;
         } else {
             /*
              * K = cbrt((W_max - cwnd) * cube_factor), the time still needed to
              * climb back to the window that last caused a loss.
              */
-            ca->bic_K = __cubic_root(CUBIC_CUBE_FACTOR * (IUINT64)(ca->last_max_cwnd - cwnd));
+            ca->bic_K            = __cubic_root(CUBIC_CUBE_FACTOR * (IUINT64)(ca->last_max_cwnd - cwnd));
             ca->bic_origin_point = ca->last_max_cwnd;
         }
     }
@@ -241,7 +232,7 @@ static void __cubic_update(ikcpcb *kcp, struct ikcp_cubic *ca, IUINT32 cwnd, IUI
         }
         if (ca->tcp_cwnd > cwnd) {
             IUINT32 delta_cwnd = ca->tcp_cwnd - cwnd;
-            IUINT32 max_cnt = cwnd / delta_cwnd;
+            IUINT32 max_cnt    = cwnd / delta_cwnd;
 
             if (ca->cnt > max_cnt) {
                 ca->cnt = max_cnt;
@@ -289,12 +280,12 @@ void ikcp_cong_cubic_release(ikcpcb *kcp)
 void ikcp_cong_cubic_on_ack(ikcpcb *kcp, IKCP_CONG_U32 acked)
 {
     struct ikcp_cubic *ca;
-    IUINT32 mss;
+    IUINT32            mss;
 
     if (kcp == NULL || kcp->cong == NULL || acked == 0) {
         return;
     }
-    ca = (struct ikcp_cubic *)kcp->cong;
+    ca  = (struct ikcp_cubic *)kcp->cong;
     mss = kcp->mss;
 
     if (kcp->cwnd >= kcp->rmt_wnd) {
@@ -332,12 +323,12 @@ void ikcp_cong_cubic_on_ack(ikcpcb *kcp, IKCP_CONG_U32 acked)
 void ikcp_cong_cubic_on_loss(ikcpcb *kcp, int is_timeout)
 {
     struct ikcp_cubic *ca;
-    IUINT32 cwnd;
+    IUINT32            cwnd;
 
     if (kcp == NULL || kcp->cong == NULL) {
         return;
     }
-    ca = (struct ikcp_cubic *)kcp->cong;
+    ca   = (struct ikcp_cubic *)kcp->cong;
     cwnd = kcp->cwnd;
 
     ca->epoch_start = 0; /* a new epoch begins after this loss */

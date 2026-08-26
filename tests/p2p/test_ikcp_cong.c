@@ -1,9 +1,9 @@
-/*
- * Host test for the CUBIC congestion control used by KCP.
- *
- * Built against the real ikcp.h so the ikcpcb layout is the one the algorithm
- * actually runs on - an earlier version of this test declared its own copy of
- * the struct and reported failures that were pure layout mismatch.
+/**
+ * @file test_ikcp_cong.c
+ * @brief Host test for the CUBIC congestion control used by KCP
+ * @version 1.0
+ * @date 2026-08-26
+ * @copyright Copyright (c) Tuya Inc.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +23,10 @@ static void check(const char *what, int ok, const char *detail)
 
 static int dummy_output(const char *buf, int len, ikcpcb *kcp, void *user)
 {
-    (void)buf; (void)len; (void)kcp; (void)user;
+    (void)buf;
+    (void)len;
+    (void)kcp;
+    (void)user;
     return 0;
 }
 
@@ -32,7 +35,9 @@ static long g_wire_bytes;
 
 static int counting_output(const char *buf, int len, ikcpcb *kcp, void *user)
 {
-    (void)buf; (void)kcp; (void)user;
+    (void)buf;
+    (void)kcp;
+    (void)user;
     g_wire_bytes += len;
     return 0;
 }
@@ -43,9 +48,9 @@ static ikcpcb *make_kcp(int with_cubic)
 
     ikcp_setoutput(kcp, dummy_output);
     ikcp_wndsize(kcp, 1024, 1024);
-    kcp->rmt_wnd = 1024;
-    kcp->cwnd = 1;
-    kcp->ssthresh = 1024;      /* stay in slow start until told otherwise */
+    kcp->rmt_wnd  = 1024;
+    kcp->cwnd     = 1;
+    kcp->ssthresh = 1024; /* stay in slow start until told otherwise */
     if (!with_cubic && kcp->cong) {
         ikcp_cong_cubic_release(kcp);
     }
@@ -79,7 +84,7 @@ int main(void)
 {
     ikcpcb *kcp;
     IUINT32 at64 = 0, at256 = 0, i, before, after;
-    char buf[128];
+    char    buf[128];
 
     /* --- ramp: how quickly a fresh flow reaches a usable window --- */
     kcp = make_kcp(1);
@@ -87,8 +92,10 @@ int main(void)
     for (i = 1; i <= 400; i++) {
         ikcp_cong_cubic_on_rtt(kcp, 30);
         ack_one_rtt(kcp);
-        if (at64 == 0 && kcp->cwnd >= 64) at64 = i;
-        if (at256 == 0 && kcp->cwnd >= 256) at256 = i;
+        if (at64 == 0 && kcp->cwnd >= 64)
+            at64 = i;
+        if (at256 == 0 && kcp->cwnd >= 256)
+            at256 = i;
     }
     snprintf(buf, sizeof(buf), "cwnd>=64 @RTT %u, >=256 @RTT %u, final %u", at64, at256, kcp->cwnd);
     check("ramps to link capacity", at64 > 0 && at64 < 40 && kcp->cwnd >= 512, buf);
@@ -139,12 +146,13 @@ int main(void)
     ikcp_release(kcp);
 
     /* --- reference: stock KCP growth, to show CUBIC is the faster of the two --- */
-    kcp = make_kcp(1);
+    kcp  = make_kcp(1);
     at64 = 0;
     for (i = 1; i <= 400; i++) {
         ikcp_cong_cubic_on_rtt(kcp, 30);
         ack_one_rtt(kcp);
-        if (at64 == 0 && kcp->cwnd >= 64) at64 = i;
+        if (at64 == 0 && kcp->cwnd >= 64)
+            at64 = i;
     }
     snprintf(buf, sizeof(buf), "cubic reached 64 in %u RTTs", at64);
     check("faster than one-per-RTT growth", at64 < 64, buf);
@@ -159,20 +167,20 @@ int main(void)
      * roughly its share of the window - here one 10 ms slice of a 300 ms RTT. */
     {
         const IUINT32 srtt = 300, interval = 10, wnd = 100;
-        IUINT32 slices = srtt / interval;
-        long first_flush, whole_rtt, window_bytes;
-        IUINT32 i;
+        IUINT32       slices = srtt / interval;
+        long          first_flush, whole_rtt, window_bytes;
+        IUINT32       i;
 
         kcp = ikcp_create(1, NULL);
         ikcp_setoutput(kcp, counting_output);
         ikcp_wndsize(kcp, 1024, 1024);
         ikcp_setmtu(kcp, 1400);
         ikcp_nodelay(kcp, 0, (int)interval, 2, 0);
-        kcp->rmt_wnd = 1024;
-        kcp->cwnd = wnd;
-        kcp->ssthresh = 1;              /* congestion avoidance, so gain is 1.2x */
-        kcp->rx_srtt = (IINT32)srtt;
-        kcp->updated = 1;               /* ikcp_flush is a no-op until update ran */
+        kcp->rmt_wnd  = 1024;
+        kcp->cwnd     = wnd;
+        kcp->ssthresh = 1; /* congestion avoidance, so gain is 1.2x */
+        kcp->rx_srtt  = (IINT32)srtt;
+        kcp->updated  = 1; /* ikcp_flush is a no-op until update ran */
         /* Far enough out that nothing retransmits inside the window under test,
          * so what is counted is purely what pacing let through. */
         kcp->rx_rto = 5000;
@@ -208,8 +216,7 @@ int main(void)
         }
         whole_rtt = g_wire_bytes;
         snprintf(buf, sizeof(buf), "%ld B unacknowledged, window claims %ld B", whole_rtt, window_bytes);
-        check("an unacked flow stops at the initial window",
-              whole_rtt > 0 && whole_rtt <= window_bytes / 4, buf);
+        check("an unacked flow stops at the initial window", whole_rtt > 0 && whole_rtt <= window_bytes / 4, buf);
 
         ikcp_release(kcp);
     }
@@ -223,11 +230,11 @@ int main(void)
         ikcp_wndsize(kcp, 1024, 1024);
         ikcp_setmtu(kcp, 1400);
         ikcp_nodelay(kcp, 0, 10, 2, 0);
-        kcp->rmt_wnd = 1024;
-        kcp->cwnd = 1;
+        kcp->rmt_wnd  = 1024;
+        kcp->cwnd     = 1;
         kcp->ssthresh = 1;
-        kcp->rx_srtt = 5000;            /* a window of one on a very long RTT */
-        kcp->updated = 1;               /* ikcp_flush is a no-op until update ran */
+        kcp->rx_srtt  = 5000; /* a window of one on a very long RTT */
+        kcp->updated  = 1;    /* ikcp_flush is a no-op until update ran */
 
         for (i = 0; i < 10; i++) {
             char payload[1000];

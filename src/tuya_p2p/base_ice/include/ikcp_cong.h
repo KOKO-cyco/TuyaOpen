@@ -28,7 +28,7 @@ struct IKCPCB;
 typedef struct IKCPCB ikcpcb;
 
 typedef uint32_t IKCP_CONG_U32;
-typedef int32_t IKCP_CONG_S32;
+typedef int32_t  IKCP_CONG_S32;
 
 /**
  * @brief Attach CUBIC congestion control to a kcp control block
