@@ -708,6 +708,59 @@ static void __p2p_ext_protocol_pack(int client, int type, char *p_result, int *p
 #define P2P_TX_KEYFRAME_ROOM 3u
 
 /**
+ * @brief Recompute how full the video send queue is against the latency budget
+ *
+ * Kept apart from the buffer check because that check only runs when a frame is
+ * actually offered, and while the sender is discarding frames waiting for a key
+ * frame it offers none. Left unpolled the occupancy stays frozen at whatever
+ * tripped the discard - always above the drain threshold, so the key frame
+ * request that ends the discard never fires and the stream waits out the whole
+ * GOP instead: measured 35 pct of encoded frames never leaving the device.
+ *
+ * @param[in]  len frame about to be offered, 0 when only polling
+ * @param[out] write_size backlog in bytes, may be NULL
+ * @param[out] send_free_size room left in the send queue, may be NULL
+ * @return occupancy in percent, above 100 when over budget, -1 if unavailable
+ */
+static int __p2p_video_fill_pct(int len, int *write_size, int *send_free_size)
+{
+    uint32_t used = 0;
+    uint32_t kbps;
+    int      budget, keyframe_room, pct;
+
+    if (sg_p2p_session == NULL) {
+        return -1;
+    }
+    if (OPRT_OK != tuya_p2p_rtc_check_buffer(sg_p2p_session->session, TUYA_VDATA_CHANNEL, &used, NULL,
+                                             (uint32_t *)send_free_size)) {
+        return -1;
+    }
+    if (write_size != NULL) {
+        *write_size = (int)used;
+    }
+
+    if ((uint32_t)len > sg_p2p_session->tx_max_frame) {
+        sg_p2p_session->tx_max_frame = (uint32_t)len;
+    }
+
+    kbps = sg_p2p_session->rc_cur_kbps ? sg_p2p_session->rc_cur_kbps : 1024u;
+    /* kbps * ms / 8 == bytes of playout time */
+    budget = (int)((kbps * P2P_TX_LATENCY_BUDGET_MS) / 8u);
+    /* A budget below one key frame reads as permanent congestion. */
+    keyframe_room = (int)(sg_p2p_session->tx_max_frame * P2P_TX_KEYFRAME_ROOM);
+    if (budget < keyframe_room) {
+        budget = keyframe_room;
+    }
+    if (budget < 1) {
+        budget = 1;
+    }
+
+    pct = (int)((int64_t)used * 100 / budget);
+    sg_p2p_session->tx_fill_pct = (pct > 100) ? 100u : (uint32_t)pct;
+    return pct;
+}
+
+/**
  * @brief May another frame of @p len be queued without falling too far behind?
  *
  * Also records how full the video queue is relative to that latency budget,
@@ -721,46 +774,27 @@ static OPERATE_RET __p2p_check_free_buffer_size(int client, int channel, int len
 
     (void)client; /* one session, one transport - the id comes from the context */
 
-    ret = tuya_p2p_rtc_check_buffer(sg_p2p_session->session, channel, (uint32_t *)&writeSize, NULL,
-                                    (uint32_t *)&sendFreeSize);
-    if (OPRT_OK != ret) {
-        return ret;
-    }
-
     if (channel == TUYA_VDATA_CHANNEL) {
-        /* writeSize is the whole backlog: mbuf queue plus KCP's. */
-        int      used = writeSize;
-        uint32_t kbps = sg_p2p_session->rc_cur_kbps ? sg_p2p_session->rc_cur_kbps : 1024u;
-        /* kbps * ms / 8 == bytes of playout time */
-        int budget = (int)((kbps * P2P_TX_LATENCY_BUDGET_MS) / 8u);
-        int keyframe_room;
+        int pct = __p2p_video_fill_pct(len, &writeSize, &sendFreeSize);
 
-        if ((uint32_t)len > sg_p2p_session->tx_max_frame) {
-            sg_p2p_session->tx_max_frame = (uint32_t)len;
+        if (pct < 0) {
+            return OPRT_COM_ERROR;
         }
-        /* A budget below one key frame reads as permanent congestion. */
-        keyframe_room = (int)(sg_p2p_session->tx_max_frame * P2P_TX_KEYFRAME_ROOM);
-        if (budget < keyframe_room) {
-            budget = keyframe_room;
-        }
-
-        if (budget < 1) {
-            budget = 1;
-        }
-        sg_p2p_session->tx_fill_pct = (uint32_t)((int64_t)used * 100 / budget);
-        if (sg_p2p_session->tx_fill_pct > 100) {
-            sg_p2p_session->tx_fill_pct = 100;
-        }
-
         /* Judged on the existing backlog, not on whether this frame also fits:
          * a key frame can exceed the budget alone and must still get through. */
-        if (used > budget) {
+        if (pct > 100) {
             if ((sg_p2p_session->tx_full_cnt % 100) == 0) {
-                PR_WARN("video queue %d bytes over the %ums budget (%d), shedding frames", used,
-                        P2P_TX_LATENCY_BUDGET_MS, budget);
+                PR_WARN("video queue %d bytes is %d pct of the %ums budget, shedding frames", writeSize, pct,
+                        P2P_TX_LATENCY_BUDGET_MS);
             }
             sg_p2p_session->tx_full_cnt++;
             return OPRT_RESOURCE_NOT_READY;
+        }
+    } else {
+        ret = tuya_p2p_rtc_check_buffer(sg_p2p_session->session, channel, (uint32_t *)&writeSize, NULL,
+                                        (uint32_t *)&sendFreeSize);
+        if (OPRT_OK != ret) {
+            return ret;
         }
     }
 
@@ -891,6 +925,26 @@ static void __p2p_rate_control(P2P_SESSION_T *pSession)
                 }
                 pSession->rc_state = RC_STATE_DECREASE;
             } else {
+                /*
+                 * Slew limit. The measurement is a delivery rate, and what gets
+                 * delivered depends on what this controller chose to send, so
+                 * following it directly is a loop feeding itself: measured the
+                 * estimate moving by a factor of fourteen window to window and
+                 * the encoder chasing it between 256 and 704 kbps, which reads
+                 * on screen as the picture changing sharpness every second.
+                 * Congestion above still cuts at once - it is the only signal
+                 * here that is not self-inflicted. Everything else moves at the
+                 * draft's rate and gets there over a few windows instead.
+                 */
+                uint32_t ceiling = pSession->rc_cur_kbps * RC_UP_NUM / RC_UP_DEN;
+                uint32_t floor_step = pSession->rc_cur_kbps * RC_DOWN_NUM / RC_DOWN_DEN;
+
+                if (want > ceiling) {
+                    want = ceiling;
+                }
+                if (want < floor_step) {
+                    want = floor_step;
+                }
                 pSession->rc_state = drained ? RC_STATE_INCREASE : RC_STATE_HOLD;
             }
         } else {
@@ -2538,7 +2592,11 @@ static void __p2p_media_send_proc(void *pArg)
                      * for it rather than on top of the congestion it is meant
                      * to recover from. Rate limited inside as well, since this
                      * runs for every frame discarded while waiting.
+                     *
+                     * Polled here rather than read: no frame is offered while
+                     * discarding, so nothing else moves this number.
                      */
+                    (void)__p2p_video_fill_pct(0, NULL, NULL);
                     if (pSession->tx_fill_pct < P2P_TX_DRAINED_PCT) {
                         (void)__p2p_request_i_frame(pSession);
                     }
