@@ -30,6 +30,7 @@ typedef struct {
     TDD_DVP_SR_CFG_T          sensor;
     TDD_DVP_SR_INTFS_T        intfs;
     TUYA_DVP_CFG_T            dvp_cfg;
+    bool                      is_inited;
 }CAMERA_DVP_DEV_T;
 
 /***********************************************************
@@ -154,6 +155,9 @@ static OPERATE_RET __tdd_camera_dvp_init(CAMERA_DVP_DEV_T *dev, TDD_CAMERA_OPEN_
     memcpy(&dev->dvp_cfg.encoded_quality, &cfg->encoded_quality, sizeof(TUYA_DVP_ENCODED_QUALITY));
 
     TUYA_CALL_ERR_RETURN(tkl_dvp_init(&dev->dvp_cfg));
+    /* Bringing the sensor up is not the same as asking it for pictures. Leave
+     * it quiet here so open() decides that, the way stop() will later. */
+    tkl_dvp_stop();
 
     if(cfg->bitrate_kbps) {
         /* Not fatal: a sensor without a hardware encoder simply keeps its own
@@ -218,6 +222,23 @@ static OPERATE_RET __tdd_camera_dvp_open(TDD_CAMERA_DEV_HANDLE_T device, TDD_CAM
     sg_dvp_dev = dvp_dev;
     p_usr_cfg  = &(dvp_dev->sensor.usr_cfg);
 
+    /*
+     * Bringing the sensor up and asking it for pictures are separate things,
+     * and only the second belongs to a viewing session. Power, I2C, the reset
+     * pulse, the DVP block and the sensor's register set are all properties of
+     * the board that do not change between viewers, so pay for them once and
+     * let open() and close() do nothing but turn the output on and off - which
+     * is all tkl_dvp_start and tkl_dvp_stop have ever done.
+     *
+     * Doing the whole sequence per session was not merely wasteful. Each pass
+     * had the layer above allocate another frame pool without releasing the
+     * last, and six reconnects took a board from 6.1 MB of free PSRAM to none,
+     * at which point the camera could no longer open at all.
+     */
+    if(dvp_dev->is_inited) {
+        return tkl_dvp_start();
+    }
+
     if(p_usr_cfg->i2c.port < TUYA_I2C_NUM_MAX) {
         TUYA_CALL_ERR_RETURN(tdd_dvp_i2c_init(&p_usr_cfg->i2c));
     }
@@ -243,7 +264,9 @@ static OPERATE_RET __tdd_camera_dvp_open(TDD_CAMERA_DEV_HANDLE_T device, TDD_CAM
         TUYA_CALL_ERR_RETURN(dvp_dev->intfs.set_ppi(&p_usr_cfg->i2c, ppi, cfg->fps, dvp_dev->intfs.arg));
     }
 
-    return rt;
+    dvp_dev->is_inited = true;
+
+    return tkl_dvp_start();
 }
 
 /**
@@ -253,7 +276,13 @@ static OPERATE_RET __tdd_camera_dvp_open(TDD_CAMERA_DEV_HANDLE_T device, TDD_CAM
  */
 static OPERATE_RET __tdd_camera_dvp_close(TDD_CAMERA_DEV_HANDLE_T device)
 {
-    return OPRT_NOT_SUPPORTED;
+    if(NULL == device) {
+        return OPRT_INVALID_PARM;
+    }
+    /* Stop the output and leave the device standing, so the next viewer costs
+     * a start rather than a whole bring-up. tkl_dvp_deinit belongs to putting
+     * the board away, not to one viewer leaving. */
+    return tkl_dvp_stop();
 }
 
 /**

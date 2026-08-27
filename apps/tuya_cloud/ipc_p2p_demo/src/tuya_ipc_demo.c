@@ -1208,11 +1208,16 @@ static OPERATE_RET __demo_open_camera(void)
 static void __demo_close_camera(void)
 {
     if (s_cam != NULL) {
+        /*
+         * A stop, not a teardown. tdl_camera_dev_close now reaches
+         * tkl_dvp_stop, which is what one viewer leaving is worth; the DVP
+         * block, the sensor's registers and the frame pool stay up for the
+         * next one. Calling tkl_dvp_deinit here as well used to be the only
+         * way to get the DMA channel back from a close that did nothing, and
+         * it is now the thing to avoid - a full bring-up per session is what
+         * made the layer above allocate a fresh megabyte each time.
+         */
         (void) tdl_camera_dev_close(s_cam);
-        /* tdl/tdd camera close is NOT_SUPPORTED, so DVP DMA (chan 8) leaks and
-         * reopen fails with "malloc dma fail / chan has been allocated".
-         * Release DVP directly here to fix reopen after APP reconnect. */
-        (void) tkl_dvp_deinit();
         s_cam = NULL;
     }
 }
