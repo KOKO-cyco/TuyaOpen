@@ -155,7 +155,47 @@ static OPERATE_RET __tdd_camera_dvp_init(CAMERA_DVP_DEV_T *dev, TDD_CAMERA_OPEN_
 
     TUYA_CALL_ERR_RETURN(tkl_dvp_init(&dev->dvp_cfg));
 
+    if(cfg->bitrate_kbps) {
+        /* Not fatal: a sensor without a hardware encoder simply keeps its own
+         * rate, and the caller finds that out through set_bitrate returning
+         * unsupported rather than by failing to open the camera. */
+        rt = tkl_dvp_set_bitrate(cfg->bitrate_kbps);
+        if(OPRT_OK != rt) {
+            PR_WARN("dvp set bitrate %d kbps failed: %d", cfg->bitrate_kbps, rt);
+            rt = OPRT_OK;
+        }
+    }
+
     return OPRT_OK;
+}
+
+/**
+ * @brief Ask the encoder to make the next frame a key frame
+ * @param device DVP camera device handle
+ * @return OPRT_OK on success, error code otherwise
+ */
+static OPERATE_RET __tdd_camera_dvp_request_i_frame(TDD_CAMERA_DEV_HANDLE_T device)
+{
+    if(NULL == device) {
+        return OPRT_INVALID_PARM;
+    }
+
+    return tkl_dvp_request_i_frame();
+}
+
+/**
+ * @brief Move the encoder's target bitrate
+ * @param device DVP camera device handle
+ * @param kbps Target bitrate
+ * @return OPRT_OK on success, error code otherwise
+ */
+static OPERATE_RET __tdd_camera_dvp_set_bitrate(TDD_CAMERA_DEV_HANDLE_T device, uint32_t kbps)
+{
+    if(NULL == device || 0 == kbps) {
+        return OPRT_INVALID_PARM;
+    }
+
+    return tkl_dvp_set_bitrate(kbps);
 }
 
 /**
@@ -251,8 +291,10 @@ OPERATE_RET tdl_camera_dvp_device_register(char *name, TDD_DVP_SR_CFG_T *sr_cfg,
     dev_info.supported_fmts = TDL_CAMERA_FMT_YUV422 | TDL_CAMERA_FMT_JPEG | TDL_CAMERA_FMT_H264;
 
     TDD_CAMERA_INTFS_T camera_intfs = {
-        .open  = __tdd_camera_dvp_open,
-        .close = __tdd_camera_dvp_close,
+        .open            = __tdd_camera_dvp_open,
+        .close           = __tdd_camera_dvp_close,
+        .request_i_frame = __tdd_camera_dvp_request_i_frame,
+        .set_bitrate     = __tdd_camera_dvp_set_bitrate,
     };
 
     return tdl_camera_device_register(name, (TDD_CAMERA_DEV_HANDLE_T)dvp_dev, &camera_intfs, &dev_info);
