@@ -36,6 +36,11 @@
 #define PACING_INFLIGHT_BDP      2U
 #define PACING_INFLIGHT_MIN_PKTS 4U
 
+/* Longest smoothed round trip the ceiling will size itself for. Bounds the
+ * srtt term against a stalled link, where srtt runs to seconds; past this the
+ * data in flight is older than anything a live stream would still show. */
+#define PACING_RTT_FOLLOW_MAX_MS 1000U
+
 /* ProbeRTT: drain the queue periodically so min_rtt sees an unloaded path.
  * Without it the filter latches onto a queued sample and the BDP is meaningless. */
 /* Opening in-flight allowance before anything is measured, as TCP's IW10. */
@@ -300,6 +305,44 @@ static IUINT32 pacing_inflight_cap(struct pacing *p, const ikcpcb *kcp, IUINT32 
         return PACING_INIT_INFLIGHT_PKTS * kcp->mtu;
     }
     cap = (((IUINT64)bw * min_rtt) / 1000u) * PACING_INFLIGHT_BDP;
+
+    /*
+     * A second floor, from the round trip a packet actually experiences.
+     *
+     * The BDP above is built from the unloaded latency on purpose - that is
+     * what stops the ceiling licencing a queue it is measuring. But it assumes
+     * every queue on the path is one this flow put there and can therefore see.
+     * Where the backlog sits somewhere else - a radio's own transmit queue, an
+     * access point - min_rtt keeps reading the empty path while packets wait
+     * far longer, and the ceiling shrinks to a size that cannot sustain the
+     * bandwidth already measured. It then throttles the flow, which lowers the
+     * delivery rate, which lowers the estimate: the better the path's unloaded
+     * latency, the harder this holds it down.
+     *
+     * Measured on hardware, same firmware a minute apart: over a relay with
+     * min_rtt 142 ms the ceiling was 45 packets and the flow ran at 1.0 Mbps;
+     * on the LAN beside it, min_rtt 20 ms against a 141 ms smoothed round trip
+     * put the ceiling on its four packet floor and the same flow managed
+     * 318 kbps, with 22 pct of frames shed for want of anywhere to go.
+     *
+     * Little's law gives the fix its size: sustaining bw at a round trip of
+     * srtt needs exactly bw * srtt outstanding, no more. Sending stays paced at
+     * bw either way, so this cannot feed a queue - it only stops the ceiling
+     * from being the thing in the way.
+     */
+    {
+        IUINT32 srtt = pacing_srtt(kcp);
+        IUINT64 sustain;
+
+        if (srtt > PACING_RTT_FOLLOW_MAX_MS) {
+            srtt = PACING_RTT_FOLLOW_MAX_MS;
+        }
+        sustain = ((IUINT64)bw * srtt) / 1000u;
+        if (cap < sustain) {
+            cap = sustain;
+        }
+    }
+
     if (cap < (IUINT64)PACING_INFLIGHT_MIN_PKTS * kcp->mtu) {
         cap = (IUINT64)PACING_INFLIGHT_MIN_PKTS * kcp->mtu;
     }
