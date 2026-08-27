@@ -45,6 +45,7 @@ const IUINT32 IKCP_THRESH_MIN    = 2;
 const IUINT32 IKCP_PROBE_INIT    = 7000;   // 7 secs to probe window size
 const IUINT32 IKCP_PROBE_LIMIT   = 120000; // up to 120 secs to probe window
 const IUINT32 IKCP_FASTACK_LIMIT = 5;      // max times to trigger fastack
+const IUINT32 IKCP_ER_THRESH     = 4;      // outstanding below this lowers the fastack bar
 
 //---------------------------------------------------------------------
 // encode / decode
@@ -1204,6 +1205,26 @@ void ikcp_flush(ikcpcb *kcp)
 
     // calculate resent
     resent = (kcp->fastresend > 0) ? (IUINT32)kcp->fastresend : 0xffffffff;
+
+    /*
+     * Early Retransmit, RFC 5827. A segment only earns a fastack per later
+     * segment acknowledged, so the count can never exceed what is outstanding:
+     * with three in flight, one loss produces at most two and a threshold of
+     * two is already the most that can ever be met. Below that the repair has
+     * to wait out an RTO, which restarts the window from 1, which keeps the
+     * window too small for fast retransmit to be reachable next time either.
+     * Measured on hardware: the window collapsed roughly every ten seconds and
+     * took fourteen to climb back, on a link losing about one packet a second.
+     * So when few are outstanding, ask for one fewer ack than there are
+     * segments that could produce one.
+     */
+    if (kcp->fastresend > 0 && kcp->nsnd_buf < IKCP_ER_THRESH) {
+        IUINT32 er = (kcp->nsnd_buf > 1) ? (kcp->nsnd_buf - 1) : 1;
+        if (er < resent) {
+            resent = er;
+        }
+    }
+
     rtomin = (kcp->nodelay == 0) ? (kcp->rx_rto >> 3) : 0;
 
 #if IKCP_PACING_RATE_LIMIT
