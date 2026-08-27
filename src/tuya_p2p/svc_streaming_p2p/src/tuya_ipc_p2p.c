@@ -2463,9 +2463,6 @@ static void __p2p_media_send_proc(void *pArg)
     uint32_t runCnt = 0;
     P2P_SESSION_T *pSession = NULL;
     OPERATE_RET op_ret = -1;
-    TY_AV_CODEC_ID type;
-    type = sg_p2p_session->av_Info.audio_codec;
-    // type = TY_AV_CODEC_AUDIO_PCM;
 
     PR_DEBUG("into p2p video send");
 
@@ -2536,6 +2533,19 @@ static void __p2p_media_send_proc(void *pArg)
                     }
                     pSession->a_pts = (pAudioFrame->pts == 0) ? pAudioFrame->timestamp * 1000 : pAudioFrame->pts;
                     pSession->a_timestamp = pAudioFrame->timestamp;
+                    /*
+                     * Read per frame, not once at thread start. This thread is
+                     * created 39 lines before av_Info is filled in the same
+                     * function, and reading the codec as its first act won that
+                     * race every time: the value was the zero the session was
+                     * memset to, which matches none of the arms below, so every
+                     * frame the ring handed over was dropped without a word.
+                     * Measured on hardware: 301 frames pulled, kcp_in on the
+                     * audio channel flat at zero for the whole session, and the
+                     * phone heard nothing from the camera.
+                     */
+                    TY_AV_CODEC_ID type = sg_p2p_session->av_Info.audio_codec;
+
                     if (TY_AV_CODEC_AUDIO_AAC_ADTS == type) {
                         /* AAC path unused on this demo */
                     } else if (TY_AV_CODEC_AUDIO_G711A == type || TY_AV_CODEC_AUDIO_G711U == type ||
@@ -2552,6 +2562,19 @@ static void __p2p_media_send_proc(void *pArg)
                             }
                             break;
                         }
+                    } else {
+                        /*
+                         * Nothing above claimed the frame. Say so rather than
+                         * dropping it quietly: an uplink that is silently
+                         * discarded looks exactly like one that is working,
+                         * from every counter the app can see.
+                         */
+                        pSession->dbg_asend_fail++;
+                        if ((pSession->dbg_asend_fail % 50) == 1) {
+                            PR_ERR("audio codec 0x%x unhandled, frame dropped (count %u)", (unsigned)type,
+                                   pSession->dbg_asend_fail);
+                        }
+                        break;
                     }
                 }
             }

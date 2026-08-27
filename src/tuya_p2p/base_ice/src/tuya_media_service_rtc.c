@@ -2007,6 +2007,8 @@ void *rtc_worker_thread(void *arg)
     uint32_t dbg_loops      = 0;
     int64_t  dbg_last_write = 0;
     int64_t  dbg_last_wire  = 0;
+    int64_t  dbg_last_awrite = 0;
+    int64_t  dbg_last_awire  = 0;
 
     while (!rtc->bQuitKCPThread) {
         dbg_loops++;
@@ -2042,6 +2044,26 @@ void *rtc_worker_thread(void *arg)
                               k->nsnd_buf);
                     dbg_last_write = vch->write_bytes;
                     dbg_last_wire  = vch->socket_send_bytes;
+                }
+                /*
+                 * Audio, on its own line and its own KCP: separate window,
+                 * separate pacer, separate estimate of what the link is worth.
+                 * Neither channel is told the other exists, and they share one
+                 * socket and one radio, so the only way to see whether voice is
+                 * taking room from video - or sitting on a backlog of its own,
+                 * which it may do for a long time since nothing bounds this
+                 * queue by playout time - is to watch both.
+                 */
+                if (rtc->channels != NULL && rtc->channels[2].kcp != NULL) {
+                    rtc_channel_t *ach = &rtc->channels[2]; /* TUYA_ADATA_CHANNEL */
+                    ikcpcb        *k   = ach->kcp;
+                    PR_NOTICE("DBG p2p au 2s: kcp_in=%lld wire=%lld rto=%d srtt=%d minrtt=%u bw=%u "
+                              "xmit=%u que=%u buf=%u rmt=%u",
+                              (long long)(ach->write_bytes - dbg_last_awrite),
+                              (long long)(ach->socket_send_bytes - dbg_last_awire), k->rx_rto, k->rx_srtt,
+                              pacing_min_rtt(k), pacing_bw(k), k->xmit, k->nsnd_que, k->nsnd_buf, k->rmt_wnd);
+                    dbg_last_awrite = ach->write_bytes;
+                    dbg_last_awire  = ach->socket_send_bytes;
                 }
                 tal_mutex_unlock(rtc->channel_lock);
                 dbg_loops    = 0;
