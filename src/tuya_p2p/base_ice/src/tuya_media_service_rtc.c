@@ -1915,12 +1915,15 @@ int tuya_p2p_rtc_channels_init(tuya_p2p_rtc_session_t *rtc)
         /*
          * ikcp_nodelay(kcp, nodelay, interval, resend, nocwnd).
          *
-         * nocwnd: set it and congestion control is gone entirely, window growth
-         * included. TuyaOS derives it from the preconnect flag, which in turn
-         * comes from whether the product is battery powered; those have nothing
-         * to do with each other, and a low-power camera sits on the weakest
-         * links of any, so it is the last one that should be sending without a
-         * window. Keep it enabled unconditionally.
+         * nocwnd is 1, which retires KCP's own AIMD window. That is not the
+         * same as sending uncontrolled: ikcp_pacing.c governs what may be
+         * outstanding from the measured BDP and paces it out at the delivery
+         * rate, so there is still a brake - just one brake instead of two
+         * fighting. KCP's window was the cruder of the pair: any timeout put
+         * it back to 1, and measured on hardware it then took fourteen seconds
+         * to climb back while the link was losing about one packet a second,
+         * so the flow spent most of its life in recovery and averaged an
+         * effective window of 6 against peaks of 27.
          *
          * resend is the duplicate-ACK count that triggers fast retransmit, and
          * TuyaOS ships 20. A segment only accumulates a fastack per later
@@ -1938,8 +1941,14 @@ int tuya_p2p_rtc_channels_init(tuya_p2p_rtc_session_t *rtc)
          * interval is written as the 10 ms it will actually be: ikcp_nodelay
          * clamps anything below 10 upwards, so the 5 that used to be here never
          * took effect and only misled.
+         *
+         * nodelay is 1, the value KCP documents for real time use. At 0 the RTO
+         * floor is 100 ms rather than 30, and a timeout doubles the segment's
+         * RTO where 1 raises it by half. Measured on hardware: the RTO reached
+         * 1463 ms, so a single loss bought over a second of silence on a link
+         * whose unloaded round trip was 42 ms.
          */
-        ikcp_nodelay(chan->kcp, 0, 10, 2, 0);
+        ikcp_nodelay(chan->kcp, 1, 10, 2, 1);
         ikcp_setmtu(chan->kcp, 1400);
         ikcp_setprocesspkt(chan->kcp, ctx_session_channel_process_pkt);
         // ikcp_setwritelog(chan->kcp, ctx_session_kcp_writelog);
@@ -2494,7 +2503,7 @@ static int __rtc_channel_recreate_kcp(rtc_channel_t *chan, uint32_t conv)
     ikcp_setoutput(chan->kcp, on_kcp_output);
     ikcp_wndsize(chan->kcp, send_wnd, recv_wnd);
     /* A channel rebuilt mid-session must keep the same congestion control. */
-    ikcp_nodelay(chan->kcp, 0, 10, 2, 0);
+    ikcp_nodelay(chan->kcp, 1, 10, 2, 1);
     ikcp_setmtu(chan->kcp, 1400);
     ikcp_setprocesspkt(chan->kcp, ctx_session_channel_process_pkt);
     return 0;
