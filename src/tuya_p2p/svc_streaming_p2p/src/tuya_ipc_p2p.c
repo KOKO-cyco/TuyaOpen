@@ -155,6 +155,7 @@ typedef struct {
     uint32_t dbg_vget_fail;                            // DBG: get-frame callback failures
     uint32_t                  dbg_vsend_fail;                           // video sends that returned an error
     uint32_t                  dbg_asend_fail;                           // audio sends that returned an error
+    uint32_t                  dbg_ashed;                                // audio frames dropped past the deadline
 
     /* Rate control: how full the video transport queue is, and the bitrate the
      * encoder has been told to produce as a result. See __p2p_rate_control. */
@@ -758,6 +759,72 @@ static int __p2p_video_fill_pct(int len, int *write_size, int *send_free_size)
     pct = (int)((int64_t)used * 100 / budget);
     sg_p2p_session->tx_fill_pct = (pct > 100) ? 100u : (uint32_t)pct;
     return pct;
+}
+
+/*
+ * Longest the audio queue may run ahead of the far end before frames are
+ * dropped rather than queued. KCP delivers everything it accepts, in order, so
+ * a frame handed over here will be played however stale it has become, and
+ * this queue is the one part of the mouth-to-ear delay the sending side still
+ * decides. Left unbounded it does not settle anywhere useful: measured on
+ * hardware, the audio channel reached 231 outstanding packets - 6.2 seconds of
+ * speech nobody would still want to hear - and then drained them at two and a
+ * half times its own rate, holding video to a tenth of its throughput for the
+ * fifteen seconds that took.
+ *
+ * The budget is spent on two things, not one. What KCP is waiting to send is
+ * the queue this exists to bound, but what it has sent and not had acked is
+ * counted too, and that part is the round trip rather than any backlog: at the
+ * 180 ms this link runs at, four frames are gone before a queue forms at all.
+ * Leave room for both, or the valve opens on an idle channel - measured at
+ * 500 ms, it shed 26 frames in a quiet 100 seconds with nothing congested.
+ */
+#define P2P_AUDIO_LATENCY_BUDGET_MS 900u
+
+/* Each frame carries a P2P header into KCP as well as its samples, and the
+ * queue is measured in what KCP holds, so the budget has to be too. */
+#define P2P_AUDIO_FRAME_OVERHEAD_PCT 15u
+
+/**
+ * @brief Bytes of audio the codec produces in a second
+ */
+static uint32_t __p2p_audio_byte_rate(void)
+{
+    static const uint32_t hz[] = {8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 96000};
+    uint32_t              rate, width = 1;
+    TRANS_IPC_AV_INFO_T  *info = &sg_p2p_session->av_Info;
+
+    if ((unsigned)info->audio_sample >= sizeof(hz) / sizeof(hz[0])) {
+        return hz[0];
+    }
+    rate = hz[info->audio_sample];
+    /* G.711 is a byte a sample whatever the frame says its width is. */
+    if (TY_AV_CODEC_AUDIO_PCM == info->audio_codec) {
+        width = (TY_AUDIO_DATABITS_16 == info->audio_databits) ? 2u : 1u;
+        width *= (TY_AUDIO_CHANNEL_STERO == info->audio_channel) ? 2u : 1u;
+    }
+    return rate * width;
+}
+
+/**
+ * @brief Has the audio queue run further ahead than the budget allows?
+ */
+static BOOL_T __p2p_audio_over_budget(void)
+{
+    uint32_t used = 0;
+    uint32_t budget;
+
+    if (sg_p2p_session == NULL) {
+        return FALSE;
+    }
+    /* waitsnd counts what KCP holds both unsent and unacked, which is the whole
+     * of what stands between this frame and the speaker. */
+    if (OPRT_OK != tuya_p2p_rtc_check_buffer(sg_p2p_session->session, TUYA_ADATA_CHANNEL, &used, NULL, NULL)) {
+        return FALSE;
+    }
+    budget = (__p2p_audio_byte_rate() * P2P_AUDIO_LATENCY_BUDGET_MS) / 1000u;
+    budget += (budget * P2P_AUDIO_FRAME_OVERHEAD_PCT) / 100u;
+    return (used > budget) ? TRUE : FALSE;
 }
 
 /**
@@ -2530,6 +2597,19 @@ static void __p2p_media_send_proc(void *pArg)
                     op_ret = sg_p2p_session->on_get_audio_frame_callback(pAudioFrame);
                     if (op_ret != OPRT_OK) {
                         break;
+                    }
+                    /*
+                     * Take it off the app's ring either way, so what resumes
+                     * once the queue drains is current speech rather than the
+                     * next of the backlog.
+                     */
+                    if (__p2p_audio_over_budget()) {
+                        pSession->dbg_ashed++;
+                        if ((pSession->dbg_ashed % 25) == 1) {
+                            PR_WARN("audio past the %u ms budget, dropping frames (count %u)",
+                                    P2P_AUDIO_LATENCY_BUDGET_MS, pSession->dbg_ashed);
+                        }
+                        continue;
                     }
                     pSession->a_pts = (pAudioFrame->pts == 0) ? pAudioFrame->timestamp * 1000 : pAudioFrame->pts;
                     pSession->a_timestamp = pAudioFrame->timestamp;
