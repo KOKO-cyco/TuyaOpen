@@ -71,11 +71,25 @@ static int __tal_thread_spawn(THREAD_HANDLE *tid, SEM_HANDLE *join_sem, void *(*
 
 static void __tal_thread_join(THREAD_HANDLE tid, SEM_HANDLE *join_sem)
 {
-    (void)tid;
     if (join_sem && *join_sem) {
         tal_semaphore_wait(*join_sem, SEM_WAIT_FOREVER);
         tal_semaphore_release(*join_sem);
         *join_sem = NULL;
+    }
+    /*
+     * The semaphore says the thread body has returned, which is not the same as
+     * the thread being gone. tal_thread's wrapper polls its own state every
+     * 10 ms once the body returns and only leaves that loop for THREAD_STATE_STOP,
+     * which nothing but tal_thread_delete sets - so a joined-but-undeleted
+     * thread stays alive forever, spinning, holding its stack. These run with
+     * psram_mode, so each session that ended left 24 KB of PSRAM and a live
+     * 100 Hz poller behind: measured on hardware, a session that never got past
+     * ICE still cost 24976 bytes, and a handful of reconnects ran the free pool
+     * from 6.1 MB down to 2188, at which point every 1600-byte mbuf allocation
+     * failed and both streams stopped.
+     */
+    if (tid != NULL) {
+        tal_thread_delete(tid);
     }
 }
 
