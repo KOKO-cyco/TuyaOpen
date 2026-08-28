@@ -46,26 +46,21 @@ extern uint64_t tuya_p2p_misc_get_current_time_ms(void);
 #define CAMERA_NAME "camera_dvp"
 #endif
 
-/* Keep the encoded I-frame under MAX_MEDIA_FRAME_SIZE (300KB): the ring buffer
- * and the P2P send path both refuse anything larger, and a dropped I-frame
- * leaves the peer unable to recover. 1080p I-frames measure well over 300KB on
- * this sensor, so 720p is the highest resolution this pipeline can carry. */
-#define LIVE_CAM_WIDTH   1280
-#define LIVE_CAM_HEIGHT  720
-#define LIVE_CAM_FPS     25
-/* One number describes the stream: it drives the encoder, sizes the ring buffer
- * (max_frame_size = min(kbps*1024*3/16, 300KB)) and is what the App is told.
- * Matches the P2P send window, which TUYA_APP_Start provisions for 1 Mbps —
- * encoding above that only produces frames the transport has to drop. */
-#define LIVE_CAM_KBPS    1024
-/* Two seconds between I-frames. Shortening this to one second was measured to
- * make things worse, not better: an I-frame here costs 10-20x a P-frame, so
- * doubling their rate ate most of the bitrate budget and left the P-frames
- * starved. The GOP is still the worst-case freeze after a resync, but paying
- * that occasionally beats degrading every second of the stream. Driven into
- * the encoder and declared to the App from this one value so they cannot
- * drift; the driver rescales it if the sensor's real frame rate differs. */
-#define LIVE_CAM_GOP     (LIVE_CAM_FPS * 2)
+#if !defined(CAMERA_DEMO_WIDTH) || !defined(CAMERA_DEMO_HEIGHT) || !defined(CAMERA_DEMO_FPS) ||                  \
+    !defined(CAMERA_DEMO_GOP) || !defined(CAMERA_DEMO_KBPS)
+#error "the board .config must set CONFIG_CAMERA_DEMO_{WIDTH,HEIGHT,FPS,GOP,KBPS} - Kconfig carries no default"
+#endif
+/* Per board, because a resolution that streams on one link floods another: an
+ * I-frame costing more than a second of the bitrate budget fills the send queue
+ * and sheds the frames behind it. Measured: 480x480 at 1024 kbps is 16-19 KB
+ * against 128 KB/s and streams clean; 1280x720 at 272 kbps was 42 KB against
+ * 34 KB/s and shed 37%. KBPS also sizes the ring buffer,
+ * max_frame_size = min(kbps*1024*3/16, 300KB), and is what the App is told. */
+#define LIVE_CAM_WIDTH   CAMERA_DEMO_WIDTH
+#define LIVE_CAM_HEIGHT  CAMERA_DEMO_HEIGHT
+#define LIVE_CAM_FPS     CAMERA_DEMO_FPS
+#define LIVE_CAM_KBPS    CAMERA_DEMO_KBPS
+#define LIVE_CAM_GOP     CAMERA_DEMO_GOP
 
 static TDL_CAMERA_HANDLE_T s_lin_cam = NULL;
 static RING_BUFFER_USER_HANDLE_T s_lin_ring_w = NULL;
@@ -740,6 +735,7 @@ int demo_on_get_audio_frame_callback(MEDIA_FRAME *media_frame)
 #include "tdl_camera_manage.h"
 #include "tuya_ipc_p2p.h"
 #include "tkl_audio.h"
+#include "tkl_vad.h"
 #include "tkl_gpio.h"
 #include "tkl_dvp.h"
 #include "resample_fixed.h"
@@ -764,13 +760,22 @@ extern uint64_t tuya_p2p_misc_get_current_time_ms(void);
  * Macros
  * --------------------------------------------------------------------------- */
 #define DEMO_SD_MOUNT       "/sdcard"
-/* TuyaOS T5AI_BOARD DVP opens at 20fps; P2P media_info still advertises 25 like wukong */
-#define DEMO_CAM_FPS        20
+#if !defined(CAMERA_DEMO_WIDTH) || !defined(CAMERA_DEMO_HEIGHT) || !defined(CAMERA_DEMO_FPS) ||                  \
+    !defined(CAMERA_DEMO_KBPS)
+#error "the board .config must set CONFIG_CAMERA_DEMO_{WIDTH,HEIGHT,FPS,KBPS} - Kconfig carries no default"
+#endif
+/* Per board; see the LIVE_CAM_* block for what the numbers cost. DEMO_AV_FPS is
+ * not one of them: the DVP opens at CAMERA_DEMO_FPS but P2P media_info
+ * advertises 25 the way wukong does. */
+#define DEMO_CAM_FPS        CAMERA_DEMO_FPS
 #define DEMO_AV_FPS         25
-#define DEMO_CAM_WIDTH      480
-#define DEMO_CAM_HEIGHT     480
-#define DEMO_CAM_GOP        25
-#define DEMO_CAM_BITRATE_KB 1024
+#define DEMO_CAM_WIDTH      CAMERA_DEMO_WIDTH
+#define DEMO_CAM_HEIGHT     CAMERA_DEMO_HEIGHT
+/* Not configurable here: tkl_dvp exposes no GOP setter, and the encoder takes it
+ * from H264_GOP_FRAME_CNT at compile time. This only reaches the App, so it has
+ * to match what the chip actually emits. */
+#define DEMO_CAM_GOP        30
+#define DEMO_CAM_BITRATE_KB CAMERA_DEMO_KBPS
 #define DEMO_FRAME_BUF_SIZE (256 * 1024)
 /* SDIO default group P2/P3/... (CMD=P3); camera I2C P13/P15 — no pin conflict */
 #if defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1)
@@ -1572,10 +1577,41 @@ static OPERATE_RET __demo_mic_start(void)
     if (rt != OPRT_OK) {
         PR_ERR("tkl_ao_set_vol failed: %d", rt);
     }
-    /* Speex+RNN VAD overflows vendor audio_element stack (kf_work Hardfault on PB entry).
-     * Keep BK aec_proc; do not hook tkl_ai_set_vad_aec_algorithm. */
+    /*
+     * Swap the vendor canceller for the Speex one, which is what tkl_vad_init
+     * installs: it registers __tkl_aec_vad_process through
+     * tkl_ai_set_vad_aec_algorithm, and aec_v3_algorithm calls that instead of
+     * aec_proc from then on. your_chat_bot has shipped this path on this board
+     * for a year; the vendor canceller has never had to work here, because
+     * that app stops capturing while it speaks and an intercom cannot.
+     *
+     * It also settles the uplink dropouts. The vendor's own VAD runs in the
+     * arm this replaces, so aec_vad_proc no longer updates vad_state, and the
+     * gate that swallowed frames - vad_enable && vad_state != VAD_NONE - stops
+     * being true. The RNN VAD in the new path only reads the output to raise a
+     * flag; it never silences it.
+     */
+    {
+        TKL_VAD_CONFIG_T vad_cfg;
+
+        memset(&vad_cfg, 0, sizeof(vad_cfg));
+        vad_cfg.sample_rate       = DEMO_MIC_SAMPLE_RATE;
+        vad_cfg.channel_num       = 1;
+        vad_cfg.speech_min_ms     = 200;  /* both as ai_chat_main.c sets them */
+        vad_cfg.noise_min_ms      = 1000;
+        vad_cfg.frame_duration_ms = 10;
+        vad_cfg.scale             = 1.0f;
+
+        rt = tkl_vad_init(&vad_cfg);
+        if (rt != OPRT_OK) {
+            PR_ERR("tkl_vad_init failed: %d, keeping the vendor canceller", rt);
+        } else {
+            (void)tkl_vad_start();
+        }
+    }
+
     s_mic_running = TRUE;
-    PR_NOTICE("mic started: 16k/16bit/mono PCM -> G.711U 8k (vendor AEC, no Speex/RNN)");
+    PR_NOTICE("mic started: 16k/16bit/mono PCM -> G.711U 8k (Speex AEC + RNN VAD)");
     return OPRT_OK;
 }
 
@@ -1588,6 +1624,10 @@ static void __demo_mic_stop(void)
         return;
     }
     s_mic_running = FALSE;
+    /* Unhooks __tkl_aec_vad_process, so a session that fails to install it
+     * again gets the vendor canceller rather than a dangling one. */
+    (void) tkl_vad_stop();
+    (void) tkl_vad_deinit();
     (void) tkl_ai_stop(DEMO_MIC_CARD, TKL_AI_0);
     (void) tkl_ai_uninit();
     PR_NOTICE("mic stopped");

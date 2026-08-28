@@ -40,6 +40,16 @@ jobs:
             echo "Cache copy script not found, skip: $SCRIPT_PATH"
           fi
           echo "::endgroup::"
+      - name: Check [SiWx917] Host Tests
+        run: |
+          echo "::group::SiWx917 host tests and board-fact cross-check"
+          cd ${{ github.workspace }}
+          if [ -x platform/SiWx917/tests/run.sh ]; then
+            ./platform/SiWx917/tests/run.sh
+          else
+            echo "::notice::platform/SiWx917 not fetched yet, skipping its host tests"
+          fi
+          echo "::endgroup::"
       - name: Check [switch_demo] Build
         env:
           BUILD_LOG_DIR: ${{ env.BUILD_LOG_BASE }}/switch_demo

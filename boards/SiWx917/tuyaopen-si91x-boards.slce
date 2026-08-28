@@ -1,0 +1,9 @@
+id: tuyaopen-si91x-boards
+version: 0.0.1
+description: "TuyaOpen SiWx917 board support, declared beside the boards themselves"
+label: "TuyaOpen SiWx917 Boards"
+sdk:
+  id: simplicity_sdk
+  version: 2025.6.1
+component_path:
+  - path: SIWX917_AI_DEV_KIT/slc

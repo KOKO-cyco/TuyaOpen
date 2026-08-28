@@ -1,0 +1,9 @@
+# Properties file for Simplicity Studio metadata
+id=com.silabs.sdk.tuyaopen-si91x-boards
+
+version=0.0.1
+
+label=TuyaOpen SiWx917 Boards
+description=TuyaOpen SiWx917 board support
+
+prop.subLabel=TuyaOpen SiWx917 Boards\\ 0.0.1-1.0
