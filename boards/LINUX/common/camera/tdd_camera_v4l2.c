@@ -426,6 +426,11 @@ static OPERATE_RET __tdd_camera_v4l2_open(TDD_CAMERA_DEV_HANDLE_T device, TDD_CA
         /* GOP is expressed in frames, so scale it with the real rate to keep
          * the interval between I-frames the caller asked for in seconds. */
         venc_cfg.gop = (cfg->gop && cfg->fps) ? (cfg->gop * real_fps / cfg->fps) : cfg->gop;
+#if defined(CAMERA_V4L2_H265) && (CAMERA_V4L2_H265 == 1)
+        venc_cfg.codec = TKL_VENC_CODEC_H265;
+#else
+        venc_cfg.codec = TKL_VENC_CODEC_H264;
+#endif
         dev->venc_bitrate_kbps = cfg->bitrate_kbps;
         dev->venc_fps_corrected = false; /* re-measure for every new encoder */
         dev->win_start_ms = 0;
@@ -438,7 +443,9 @@ static OPERATE_RET __tdd_camera_v4l2_open(TDD_CAMERA_DEV_HANDLE_T device, TDD_CA
             dev->tkl_hdl = NULL;
             return vrt;
         }
-        PR_INFO("MPP H264 encoder ready: %ux%u @%ufps gop=%u", cfg->width, cfg->height, real_fps, venc_cfg.gop);
+        PR_INFO("MPP %s encoder ready: %ux%u @%ufps gop=%u",
+                venc_cfg.codec == TKL_VENC_CODEC_H265 ? "H265" : "H264", cfg->width, cfg->height, real_fps,
+                venc_cfg.gop);
     }
 #endif
 

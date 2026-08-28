@@ -48,6 +48,16 @@ menu "TaishanPi_3 Board Configuration"
             string "V4L2 device node"
             depends on ENABLE_CAMERA_V4L2
             default "/dev/video0"
+
+        config CAMERA_V4L2_H265
+            bool "Encode H.265 instead of H.264"
+            depends on ENABLE_CAMERA_V4L2
+            default n
+            ---help---
+                RK3576 encodes HEVC in the same hardware block as H.264, at a
+                better picture for the same bitrate, resolution and frame rate.
+                Turn this on only when every player that receives the stream
+                can decode H.265 - there is no runtime negotiation.
     endif
 
     config ENABLE_SDL_DISPLAY

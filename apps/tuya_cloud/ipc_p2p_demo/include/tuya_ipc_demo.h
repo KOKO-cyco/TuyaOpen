@@ -23,6 +23,24 @@ extern "C" {
 #include "tuya_cloud_types.h"
 #include "tuya_ipc_p2p.h"
 
+/* ---------------------------------------------------------------------------
+ * What this build carries - both from menuconfig, both off by default.
+ * --------------------------------------------------------------------------- */
+#if defined(CAMERA_DEMO_AUDIO) && (CAMERA_DEMO_AUDIO == 1)
+#define DEMO_ENABLE_AUDIO 1
+#else
+#define DEMO_ENABLE_AUDIO 0
+#endif
+
+/* Recording and playback need both: the option is on, and the library it
+ * selects actually got built. */
+#if defined(CAMERA_DEMO_LOCAL_STORE) && (CAMERA_DEMO_LOCAL_STORE == 1) &&                                          \
+    defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1)
+#define DEMO_HAS_LOCAL_STORE 1
+#else
+#define DEMO_HAS_LOCAL_STORE 0
+#endif
+
 /**
  * @brief Initialize demo video file
  * @return none

@@ -21,7 +21,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#if defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1)
+#if DEMO_HAS_LOCAL_STORE
 #include "local_store.h"
 #endif
 
@@ -254,7 +254,7 @@ static OPERATE_RET __pb_resolve_path(uint32_t play_ts, char *path, uint32_t path
         *seg_end = 0;
     }
 
-#if defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1)
+#if DEMO_HAS_LOCAL_STORE
     {
         LOCAL_STORE_SEG_T seg;
         OPERATE_RET rt;
@@ -370,6 +370,11 @@ static BOOL_T __pb_open_next_segment(TUYA_FILE *fp, uint32_t *seg_start, uint32_
      * take it from the heap: this runs once per segment boundary, never in the
      * per-frame path.
      */
+#if !DEMO_HAS_LOCAL_STORE
+    /* No index to walk, so the segment that just ended was the last one. */
+    (void)next_end;
+    return FALSE;
+#else
     {
         LOCAL_STORE_SEG_T *segs;
         uint32_t count = DEMO_PB_DAY_SEG_MAX;
@@ -400,6 +405,7 @@ static BOOL_T __pb_open_next_segment(TUYA_FILE *fp, uint32_t *seg_start, uint32_
             return FALSE; /* last recording of the day */
         }
     }
+#endif /* DEMO_HAS_LOCAL_STORE */
 
     memset(path, 0, sizeof(path));
     if (__pb_resolve_path(next_start, path, sizeof(path), &next_start, &next_end) != OPRT_OK) {
@@ -709,7 +715,7 @@ static int __demo_media_stream_event_cb(const int device, const int channel,
     case MEDIA_STREAM_SPEAKER_STOP:
         break;
 
-#if defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1)
+#if DEMO_HAS_LOCAL_STORE
     case MEDIA_STREAM_PLAYBACK_QUERY_MONTH_SIMPLIFY: {
         C2C_TRANS_QUERY_PB_MONTH_RESP *month = (C2C_TRANS_QUERY_PB_MONTH_RESP *)args;
         uint32_t bitmap = 0;
@@ -890,8 +896,7 @@ void demo_media_event_register(void)
     }
     PR_NOTICE("demo media stream event_cb registered");
 
-#if defined(ENABLE_LOCAL_STORE) && (ENABLE_LOCAL_STORE == 1) && \
-    defined(CAMERA_DEMO_PB_SEED) && (CAMERA_DEMO_PB_SEED == 1)
+#if DEMO_HAS_LOCAL_STORE && defined(CAMERA_DEMO_PB_SEED) && (CAMERA_DEMO_PB_SEED == 1)
     rt = local_store_seed_h264(DEMO_PB_SEED_SRC, DEMO_PB_SEED_LEAF, DEMO_PB_SEED_DURATION_SEC);
     if (rt != OPRT_OK) {
         PR_WARN("pb seed %s failed: %d (copy Annex-B H264 to that path)", DEMO_PB_SEED_SRC, rt);

@@ -1256,7 +1256,15 @@ static OPERATE_RET __p2p_pack_h265_rtp_and_send(int client, char *pData, int len
     uint16_t seq = sg_p2p_session->video_seq_num;
     uint32_t ssrc = 10;
     uint32_t timestamp = __p2p_video_rtp_timestamp_ms90();
+    /* 95 is Tuya's H265_PAY_LOAD, which the App keys off: nothing else on the
+     * wire says which codec this is - MEDIA_FRAME_T carries no codec and the
+     * App never queries video params. See rtp_payload_find() for why the
+     * library had to be taught this number. */
     pRtpDelegate = rtp_payload_encode_create(/*H265_PAY_LOAD*/ 95, "H265", seq, ssrc, &rtp_packer, &rtp_pack_nal_arg);
+    if (NULL == pRtpDelegate) {
+        PR_ERR("rtp_payload_encode_create h265 failed");
+        return OPRT_COM_ERROR;
+    }
     ret                = rtp_payload_encode_input(pRtpDelegate, pData, len, timestamp);
     rtp_payload_encode_getinfo(pRtpDelegate, &sg_p2p_session->video_seq_num, &timestamp);
     rtp_payload_encode_destroy(pRtpDelegate);
