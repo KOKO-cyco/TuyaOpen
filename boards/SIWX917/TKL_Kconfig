@@ -74,6 +74,15 @@ config ENABLE_WAKEUP
       Actual NPSS arming lands with the PS0 integration; until then
       DEEP_SLEEP entry stays refused and recording is inert.
 
+config ENABLE_SIWX917_TICKLESS
+    bool "ENABLE_SIWX917_TICKLESS: power manager + tickless idle (needs current-meter validation)"
+    default n
+    help
+      Pull sl_power_manager + wireless wakeup into the SLC project and
+      bind tkl_sleep to real PS requirements. The manager auto-inits at
+      boot (initial PS3) and tickless takes over the FreeRTOS idle path,
+      so enable only on the bench with a power meter attached.
+
 config ENABLE_PWM
     bool
     default y
