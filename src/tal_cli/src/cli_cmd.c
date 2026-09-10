@@ -63,6 +63,7 @@ static void cmd_sys_timer_count(int argc, char *argv[]);
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 static void cmd_sys_wifi_info(int argc, char *argv[]);
 static void cmd_sys_wifi_scan(int argc, char *argv[]);
+static void cmd_sys_wifi_lp(int argc, char *argv[]);
 #endif
 #endif /* CLI_CMD_SYS */
 
@@ -1225,6 +1226,25 @@ static void cmd_sys_wifi_scan(int argc, char *argv[])
 
     tal_wifi_release_ap(ap_list);
 }
+
+/* TEMP-DEBUG 2026-09-10: manual NWP power-save switch for Phase-1 slice A
+ * verification on SIWX917 (revert once tuya_pm drives this path).
+ * Usage: wifi_lp 1 [dtim]  (dtim defaults to 10, clamped to 1..10 in TKL)
+ *        wifi_lp 0          (back to HIGH_PERFORMANCE) */
+static void cmd_sys_wifi_lp(int argc, char *argv[])
+{
+    OPERATE_RET rt;
+
+    if ((argc >= 2) && ((strcmp(argv[1], "1") == 0) || (strcmp(argv[1], "on") == 0))) {
+        uint32_t dtim = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 10u;
+        tal_wifi_set_lps_dtim(dtim);
+        rt = tal_wifi_lp_enable();
+        cli_echof_("wifi_lp on dtim=%u rt=%d", (unsigned)dtim, rt);
+    } else {
+        rt = tal_wifi_lp_disable();
+        cli_echof_("wifi_lp off rt=%d", rt);
+    }
+}
 #endif
 
 #endif /* CLI_CMD_SYS */
@@ -1766,6 +1786,7 @@ static cli_cmd_t s_cli_cmd[] = {
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
     {.name = "sys_wifi_info",    .help = "Show current WiFi SSID/BSSID/RSSI",   .func = cmd_sys_wifi_info},
     {.name = "sys_wifi_scan",    .help = "Scan nearby WiFi APs",                .func = cmd_sys_wifi_scan},
+    {.name = "wifi_lp",          .help = "TEMP NWP powersave: wifi_lp 1 [dtim] | wifi_lp 0", .func = cmd_sys_wifi_lp},
 #endif
 #endif /* CLI_CMD_SYS */
 
