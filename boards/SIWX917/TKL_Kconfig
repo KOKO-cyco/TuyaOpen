@@ -65,6 +65,15 @@ config ENABLE_GPIO
     bool
     default y
 
+config ENABLE_WAKEUP
+    bool "ENABLE_WAKEUP: deep-sleep wakeup source record (tkl_wakeup.c)"
+    default n
+    help
+      Record GPIO/TIMER/RTC wakeup sources for PS0 deep sleep.
+      GPIO is limited to UULP 0-4 (the only pins that wake Sleep).
+      Actual NPSS arming lands with the PS0 integration; until then
+      DEEP_SLEEP entry stays refused and recording is inert.
+
 config ENABLE_PWM
     bool
     default y

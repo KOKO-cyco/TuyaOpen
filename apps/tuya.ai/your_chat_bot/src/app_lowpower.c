@@ -152,7 +152,11 @@ void app_lowpower_init(void)
         PR_ERR("pm set_chain failed: %d", rt);
         return;
     }
+#if defined(ENABLE_POWER)
     rt = tuya_pm_init(POWER_NAME);
+#else
+    rt = tuya_pm_init(NULL);
+#endif
     if (OPRT_OK != rt) {
         PR_ERR("pm init failed: %d", rt);
         return;

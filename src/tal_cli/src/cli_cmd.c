@@ -1238,6 +1238,7 @@ static void cmd_sys_wifi_lp(int argc, char *argv[])
     if ((argc >= 2) && ((strcmp(argv[1], "1") == 0) || (strcmp(argv[1], "on") == 0))) {
         uint32_t dtim = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 10u;
         tal_wifi_set_lps_dtim(dtim);
+        tal_cpu_set_lp_mode(TRUE);
         rt = tal_wifi_lp_enable();
         cli_echof_("wifi_lp on dtim=%u rt=%d", (unsigned)dtim, rt);
     } else {
